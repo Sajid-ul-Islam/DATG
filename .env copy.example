@@ -1,0 +1,5 @@
+# Telegram Bot Configuration
+TELEGRAM_BOT_TOKEN=8662499705:AAGOk6vqbxOCZMhicLOm3ZK7pkYh6zMo3-Y
+# Deployment Settings (Optional for Webhooks)
+WEBHOOK_URL=https://your-domain.vercel.app/api/webhook
+PORT=8000
