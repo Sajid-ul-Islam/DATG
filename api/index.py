@@ -31,11 +31,27 @@ async def get_telegram_app() -> Application:
     return bot_app
 
 
+@fastapi_app.get("/")
+async def root():
+    return {
+        "status": "online",
+        "service": "Telegram Data Analysis Bot",
+        "instructions": "Upload CSV/Excel files to your Telegram Bot.",
+        "endpoints": {
+            "health": "/api/health",
+            "set_webhook": "/api/set_webhook",
+            "webhook": "/api/webhook"
+        }
+    }
+
+
+@fastapi_app.get("/health")
 @fastapi_app.get("/api/health")
 async def health_check():
     return {"status": "ok", "service": "Telegram Data Analysis Bot"}
 
 
+@fastapi_app.post("/webhook")
 @fastapi_app.post("/api/webhook")
 async def telegram_webhook(request: Request):
     """
@@ -53,6 +69,7 @@ async def telegram_webhook(request: Request):
         return Response(content=str(e), status_code=500)
 
 
+@fastapi_app.get("/set_webhook")
 @fastapi_app.get("/api/set_webhook")
 async def set_webhook():
     """
@@ -61,7 +78,7 @@ async def set_webhook():
     if not TELEGRAM_BOT_TOKEN or not WEBHOOK_URL:
         raise HTTPException(
             status_code=400,
-            detail="TELEGRAM_BOT_TOKEN and WEBHOOK_URL must be configured."
+            detail="TELEGRAM_BOT_TOKEN and WEBHOOK_URL environment variables must be configured in Vercel settings."
         )
 
     app = await get_telegram_app()
@@ -74,3 +91,4 @@ async def set_webhook():
 
 # Expose FastAPI application as `app` for Vercel
 app = fastapi_app
+
