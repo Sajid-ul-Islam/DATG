@@ -18,6 +18,7 @@ A fast, production-ready Telegram bot that processes uploaded CSV and Excel (`.x
   - 🏷️ Frequency Bar Charts for top categorical features.
   - 📅 Time-Series Line Charts when date columns are detected.
 - **Interactive Commands**: Explore the loaded dataset with `/preview`, `/columns`, `/stats`, `/sort`, `/filter`, and `/export`.
+- **Multi-Format Report Download**: Export the full analysis with `/report` — dataset as CSV, an Excel workbook (data + summary sheets), a formatted PDF report, or a single report image (`/report all` sends every format).
 - **Multi-Sheet Excel**: browse workbook tabs with `/sheets` and analyze any tab with `/sheet <name>`.
 - **Load from URL**: analyze a CSV/Excel file from a direct link with `/load <url>`.
 - **Google Sheets**: analyze a *public* Google Sheet with `/gsheet <url>` (no API key needed).
@@ -195,7 +196,7 @@ The check step is skipped until both are set. Use the **Run workflow** button in
 
 ## 🧪 Running Automated Tests
 
-Run unit tests to verify dataset loading, statistics, sorting, filtering, chart generation, session persistence, and error handling:
+Run unit tests to verify dataset loading, statistics, sorting, filtering, chart generation, report export (Excel/PDF/image), session persistence, webhook hardening, and error handling:
 
 ```bash
 pytest
@@ -207,28 +208,34 @@ pytest
 
 ```
 DATG/
+├── .github/
+│   └── workflows/
+│       └── deploy-check.yml   # CI: tests + deployment check (waits for the new build)
 ├── api/
 │   ├── __init__.py
-│   └── index.py            # FastAPI serverless webhook endpoint (Vercel)
+│   └── index.py               # FastAPI serverless webhook endpoint (Vercel)
 ├── bot/
 │   ├── __init__.py
-│   ├── analyzer.py         # Pandas analysis & Matplotlib visualization engine
-│   ├── config.py           # Environment configuration loader
-│   ├── handlers.py         # Telegram update handlers (commands + document listener)
-│   ├── session_store.py    # SQLite-backed session persistence
-│   └── cloud_store.py      # Vercel Blob-backed session persistence (serverless)
+│   ├── analyzer.py            # Pandas analysis & Matplotlib visualization engine
+│   ├── config.py              # Environment configuration loader
+│   ├── handlers.py            # Telegram update handlers (commands + document listener)
+│   ├── session_store.py       # SQLite-backed session persistence
+│   └── cloud_store.py         # Vercel Blob-backed session persistence (serverless)
 ├── tests/
 │   ├── __init__.py
-│   ├── test_analyzer.py    # Analyzer unit tests (summary, stats, sort, charts)
+│   ├── test_analyzer.py       # Analyzer unit tests (summary, stats, sort, charts, reports)
+│   ├── test_check_deployment.py  # Deployment checklist helper tests
+│   ├── test_handlers.py       # URL / Google Sheets / report-export helper tests
 │   ├── test_session_store.py  # SQLite session persistence tests
-│   └── test_cloud_store.py    # Vercel Blob session persistence tests (offline)
+│   ├── test_cloud_store.py    # Vercel Blob session persistence tests (offline)
+│   └── test_webhook.py        # Webhook secret-header tests
 ├── .env.example
-├── main.py                 # Local polling entry point
+├── main.py                    # Local polling entry point
 ├── scripts/
-│   └── check_deployment.py # Read-only deployment verification (env/health/webhook)
+│   └── check_deployment.py    # Deployment verification (env/health/webhook, --fix, --expect-commit)
 ├── README.md
-├── requirements.txt        # Python dependencies
-└── vercel.json             # Vercel serverless routing config
+├── requirements.txt           # Python dependencies
+└── vercel.json                # Vercel serverless routing config
 ```
 
 ---
