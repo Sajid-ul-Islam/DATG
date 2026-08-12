@@ -167,10 +167,10 @@ Add `--fix` to safely re-register the webhook when it's misconfigured (prompts f
 python scripts/check_deployment.py --url https://<your-app>.vercel.app --fix
 ```
 
-Add `--fix` to safely re-register the webhook when it's misconfigured (prompts for confirmation; `--yes` skips it). The fix calls the deployed app's own `/api/set_webhook` endpoint — the same action as visiting it in a browser — then re-runs the webhook checks:
+Because Vercel builds asynchronously, the live deployment can briefly serve the *previous* commit. To wait until the app reports a specific commit before checking (its `/api/health` exposes the deployed git SHA), pass `--expect-commit` with a `--wait` budget in seconds:
 
 ```bash
-python scripts/check_deployment.py --url https://<your-app>.vercel.app --fix
+python scripts/check_deployment.py --url https://<your-app>.vercel.app --expect-commit <git-sha> --wait 600
 ```
 
 ---
@@ -180,7 +180,7 @@ python scripts/check_deployment.py --url https://<your-app>.vercel.app --fix
 A workflow (`.github/workflows/deploy-check.yml`) runs on every push to `main`:
 
 1. **Tests** — installs dependencies and runs the full pytest suite.
-2. **Deployment check** — runs the [checklist](#-deployment-checklist) against the live deployment with `--fix --yes`, so a misconfigured webhook is repaired automatically (no manual `/api/set_webhook` visit).
+2. **Deployment check** — runs the [checklist](#-deployment-checklist) with `--expect-commit $GITHUB_SHA --wait 600 --fix --yes`. It first **waits (up to 10 minutes)** until Vercel finishes building and the live app reports the exact commit being pushed (via `/api/health`), so it can never validate the previous deployment; a misconfigured webhook is then repaired automatically (no manual `/api/set_webhook` visit).
 
 To enable the deployment check, configure two settings in your GitHub repo:
 
@@ -189,7 +189,7 @@ To enable the deployment check, configure two settings in your GitHub repo:
 
 The job is skipped until both are set. Use the **Run workflow** button in the Actions tab to run it manually anytime.
 
-> **Note:** the check runs against the *currently live* deployment. Vercel builds asynchronously, so right after a push it may still be serving the previous commit — re-run the workflow manually (or wait for Vercel to finish) to verify the new deployment.
+> **Note:** the wait assumes Vercel exposes the deployed commit via the `VERCEL_GIT_COMMIT_SHA` system env var (true for Git-connected deployments). If the wait times out, the workflow fails with a clear message — re-run it after Vercel finishes building.
 
 ---
 

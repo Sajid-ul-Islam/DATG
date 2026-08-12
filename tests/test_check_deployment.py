@@ -11,11 +11,13 @@ from scripts.check_deployment import (
     app_url_from_webhook,
     classify_webhook_error,
     confirm,
+    deployment_matches_health,
     fix_webhook,
     health_url_for,
     is_webhook_failure,
     load_env_file,
     needs_fix,
+    wait_for_deployment,
     webhook_url_for,
 )
 
@@ -170,3 +172,66 @@ def test_confirm_rejects_other(monkeypatch):
     for answer in ("n", "", "maybe"):
         monkeypatch.setattr("builtins.input", lambda prompt, a=answer: a)
         assert confirm("Proceed? ") is False
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Wait-for-deployment logic (--expect-commit / --wait)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_deployment_matches_health_ok():
+    assert deployment_matches_health({"status": "ok", "commit": "abc123"}, "abc123") is True
+
+
+def test_deployment_matches_health_no_expected_commit():
+    assert deployment_matches_health({"status": "ok", "commit": "abc123"}, "") is True
+
+
+def test_deployment_matches_health_wrong_commit():
+    assert deployment_matches_health({"status": "ok", "commit": "old"}, "new") is False
+
+
+def test_deployment_matches_health_missing_commit_field():
+    assert deployment_matches_health({"status": "ok"}, "abc123") is False
+
+
+def test_deployment_matches_health_unhealthy():
+    assert deployment_matches_health({"status": "error"}, "abc123") is False
+    assert deployment_matches_health({}, "abc123") is False
+    assert deployment_matches_health(None, "abc123") is False
+
+
+def test_wait_for_deployment_skips_without_commit():
+    ok, msg = wait_for_deployment("https://app.example", "")
+    assert ok is True
+    assert "skipping" in msg
+
+
+def test_wait_for_deployment_succeeds_on_match(monkeypatch):
+    def fake_get(url, timeout=15):
+        assert url.endswith("/api/health")
+        return (200, {"status": "ok", "commit": "abc123"})
+
+    monkeypatch.setattr(mod, "http_get_json", fake_get)
+    ok, msg = wait_for_deployment("https://app.example", "abc123", timeout=30, interval=1)
+    assert ok is True
+    assert "abc123" in msg
+
+
+def test_wait_for_deployment_times_out_on_wrong_commit(monkeypatch):
+    monkeypatch.setattr(
+        mod, "http_get_json",
+        lambda url, timeout=15: (200, {"status": "ok", "commit": "old"}),
+    )
+    ok, msg = wait_for_deployment("https://app.example", "abc123", timeout=0.05, interval=0.01)
+    assert ok is False
+    assert "Timed out" in msg
+
+
+def test_wait_for_deployment_times_out_when_health_down(monkeypatch):
+    monkeypatch.setattr(
+        mod, "http_get_json",
+        lambda url, timeout=15: (None, {"_error": "unreachable"}),
+    )
+    ok, _ = wait_for_deployment("https://app.example", "abc123", timeout=0.05, interval=0.01)
+    assert ok is False

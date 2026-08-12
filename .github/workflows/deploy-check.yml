@@ -34,9 +34,17 @@ jobs:
         with:
           python-version: "3.12"
       # The checklist script is pure-stdlib: no dependency install needed.
-      # --fix --yes re-registers the webhook automatically when it is
-      # misconfigured (only after the app's health check passes).
-      - name: Run deployment checklist (auto-fix webhook)
+      # --expect-commit <SHA> --wait 600 polls /api/health until Vercel finishes
+      # building and serves the exact commit being pushed, so the checks can
+      # never validate the previous deployment. --fix --yes re-registers the
+      # webhook automatically when it is misconfigured (only after the app's
+      # health check passes and the expected deployment is live).
+      - name: Run deployment checklist (wait for deploy, auto-fix webhook)
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-        run: python scripts/check_deployment.py --url "${{ vars.APP_URL }}" --fix --yes
+        run: >-
+          python scripts/check_deployment.py
+          --url "${{ vars.APP_URL }}"
+          --expect-commit "${{ github.sha }}"
+          --wait 600
+          --fix --yes

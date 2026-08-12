@@ -1,4 +1,5 @@
 import logging
+import os
 import time
 from fastapi import FastAPI, Request, Response, HTTPException
 from telegram import Update
@@ -51,7 +52,13 @@ async def root():
 @app.get("/health")
 @app.get("/api/health")
 async def health_check():
-    return {"status": "ok", "service": "Telegram Data Analysis Bot"}
+    # `commit` is the deployed git SHA (set by Vercel via VERCEL_GIT_COMMIT_SHA).
+    # CI uses it to wait for the new deployment before running checks.
+    return {
+        "status": "ok",
+        "service": "Telegram Data Analysis Bot",
+        "commit": os.environ.get("VERCEL_GIT_COMMIT_SHA", ""),
+    }
 
 
 def _check_secret_header(request: Request) -> bool:

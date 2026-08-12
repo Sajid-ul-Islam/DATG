@@ -13,9 +13,16 @@ own /api/set_webhook endpoint when the checks find it misconfigured (same
 action as visiting that URL in a browser). It prompts for confirmation unless
 --yes is given. Read-only otherwise — never changes anything else.
 
+Vercel builds asynchronously after a push, so the live deployment may briefly
+serve the *previous* commit. Pass --expect-commit <SHA> --wait <SECONDS> to
+poll GET /api/health until the app reports that exact commit (its `commit`
+field) before running any checks.
+
 Usage:
     python scripts/check_deployment.py --url https://<your-app>.vercel.app
     python scripts/check_deployment.py --url https://<your-app>.vercel.app --fix
+    python scripts/check_deployment.py --url https://<your-app>.vercel.app \
+        --expect-commit <git-sha> --wait 600
     python scripts/check_deployment.py --token <TOKEN> --url https://<your-app>.vercel.app
     python scripts/check_deployment.py          # reads .env (TELEGRAM_BOT_TOKEN, WEBHOOK_URL)
 
@@ -25,6 +32,7 @@ import argparse
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -103,6 +111,50 @@ def classify_webhook_error(message: str):
     return "unknown", (
         "Telegram reported a delivery error. Check the deployment logs and "
         "re-visit /api/set_webhook."
+    )
+
+
+def deployment_matches_health(health_json, expected_commit: str) -> bool:
+    """
+    True when the health payload reports a healthy app from `expected_commit`.
+
+    An empty `expected_commit` matches any healthy deployment. A payload is
+    healthy only when its `status` is "ok"; when an expected commit is given,
+    the deployment must report that exact `commit` too.
+    """
+    if not isinstance(health_json, dict) or health_json.get("status") != "ok":
+        return False
+    if expected_commit and health_json.get("commit") != expected_commit:
+        return False
+    return True
+
+
+def wait_for_deployment(
+    app_url: str,
+    expected_commit: str,
+    timeout: float = 420.0,
+    interval: float = 15.0,
+):
+    """
+    Poll GET /api/health until the live deployment serves `expected_commit`.
+
+    Returns (ok, message). With an empty `expected_commit` it returns success
+    immediately (no waiting). On timeout it returns a message explaining that
+    Vercel may still be building or the build may have failed.
+    """
+    if not expected_commit:
+        return True, "No expected commit given — skipping wait."
+    deadline = time.time() + timeout
+    while True:
+        _, data = http_get_json(health_url_for(app_url), timeout=min(interval, 15.0))
+        if deployment_matches_health(data, expected_commit):
+            return True, f"Deployment is live with commit {expected_commit}."
+        if time.time() >= deadline:
+            break
+        time.sleep(interval)
+    return False, (
+        f"Timed out after {int(timeout)}s waiting for commit {expected_commit}. "
+        "Vercel may still be building, or the build may have failed."
     )
 
 
@@ -299,6 +351,14 @@ def main() -> int:
     parser.add_argument("--env-file", default=".env", help="Path to .env file (default: .env)")
     parser.add_argument("--timeout", type=float, default=15.0, help="HTTP timeout in seconds")
     parser.add_argument(
+        "--expect-commit", default="",
+        help="Wait until the deployment reports this commit in /api/health before checking",
+    )
+    parser.add_argument(
+        "--wait", type=float, default=0.0,
+        help="Max seconds to wait for --expect-commit (default 0 = no waiting)",
+    )
+    parser.add_argument(
         "--fix", action="store_true",
         help="Re-register the webhook via /api/set_webhook if it is misconfigured",
     )
@@ -327,14 +387,31 @@ def main() -> int:
                        "Pass --url or set WEBHOOK_URL in env/.env."))
     checks.extend(optional_env_info(env))
 
+    # 1b. Optional: wait until the deployment serves the expected commit
+    wait_row = None
+    if args.expect_commit and args.wait > 0 and token and app_url:
+        print(f"⏳ Waiting up to {int(args.wait)}s for the deployment to serve "
+              f"commit {args.expect_commit}...")
+        ok, msg = wait_for_deployment(app_url, args.expect_commit, args.wait)
+        wait_row = (
+            (CHECK, "Deployment is the expected commit", msg)
+            if ok
+            else (FAIL, "Timed out waiting for the expected deployment", msg)
+        )
+        checks.append(wait_row)
+
     # 2. Health + webhook (only possible with both token and URL)
     health_row = None
     webhook_start = len(checks)
     if token and app_url:
-        health_row = check_health(app_url, args.timeout)
-        checks.append(health_row)
-        webhook_start = len(checks)
-        checks.extend(check_webhook(token, webhook_url_for(app_url), args.timeout, env))
+        if wait_row is not None and wait_row[0] == FAIL:
+            checks.append((FAIL, "Skipped health + webhook checks",
+                           "The deployment serving the expected commit is not live yet."))
+        else:
+            health_row = check_health(app_url, args.timeout)
+            checks.append(health_row)
+            webhook_start = len(checks)
+            checks.extend(check_webhook(token, webhook_url_for(app_url), args.timeout, env))
     else:
         checks.append((FAIL, "Skipped health + webhook checks",
                        "Both the bot token and the app URL are required."))
@@ -348,6 +425,9 @@ def main() -> int:
         if health_row is not None and health_row[0] == FAIL:
             print("\n  App health check failed — refusing to re-register the webhook")
             print("  on an unreachable deployment. Fix the deployment first.")
+        elif wait_row is not None and wait_row[0] == FAIL:
+            print("\n  The expected deployment is not live yet — refusing to re-register")
+            print("  the webhook on an outdated deployment. Re-run once it is live.")
         elif needs_fix(webhook_rows):
             print("\n🔧 --fix requested — the webhook registration looks misconfigured.")
             if args.yes or confirm("Re-register the webhook via /api/set_webhook now? [y/N]: "):
