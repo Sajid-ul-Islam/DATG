@@ -187,7 +187,7 @@ To enable the deployment check, configure two settings in your GitHub repo:
 - **Repository variable** `APP_URL` — e.g. `https://myapp.vercel.app`
 - **Secret** `TELEGRAM_BOT_TOKEN` — your bot token
 
-The job is skipped until both are set. Use the **Run workflow** button in the Actions tab to run it manually anytime.
+The check step is skipped until both are set. Use the **Run workflow** button in the Actions tab to run it manually anytime.
 
 > **Note:** the wait assumes Vercel exposes the deployed commit via the `VERCEL_GIT_COMMIT_SHA` system env var (true for Git-connected deployments). If the wait times out, the workflow fails with a clear message — re-run it after Vercel finishes building.
 
