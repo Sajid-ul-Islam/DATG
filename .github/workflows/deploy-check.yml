@@ -27,8 +27,8 @@ jobs:
     # Enabled by setting the APP_URL repository variable and the
     # TELEGRAM_BOT_TOKEN secret (see the README's CI section). The check step
     # below is skipped until both are configured.
-    # NOTE: the `secrets` context is only allowed in step-level `if:`
-    # conditions (a job-level `if:` makes the workflow file invalid).
+    # NOTE: the `secrets` context is not allowed in `if:` expressions, so both
+    # values are copied into step-level env vars and checked via `env.` there.
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -41,12 +41,14 @@ jobs:
       # webhook automatically when it is misconfigured (only after the app's
       # health check passes and the expected deployment is live).
       - name: Run deployment checklist (wait for deploy, auto-fix webhook)
-        if: vars.APP_URL != '' && secrets.TELEGRAM_BOT_TOKEN != ''
+        if: env.DATG_APP_URL != '' && env.DATG_BOT_TOKEN != ''
         env:
+          DATG_APP_URL: ${{ vars.APP_URL }}
+          DATG_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         run: >-
           python scripts/check_deployment.py
-          --url "${{ vars.APP_URL }}"
+          --url "${{ env.DATG_APP_URL }}"
           --expect-commit "${{ github.sha }}"
           --wait 600
           --fix --yes
