@@ -210,7 +210,8 @@ pytest
 DATG/
 ├── .github/
 │   └── workflows/
-│       └── deploy-check.yml   # CI: tests + deployment check (waits for the new build)
+│       ├── deploy-check.yml   # CI: tests + deployment check (waits for the new build)
+│       └── lint.yml           # actionlint: syntax-check all workflow files
 ├── api/
 │   ├── __init__.py
 │   └── index.py               # FastAPI serverless webhook endpoint (Vercel)

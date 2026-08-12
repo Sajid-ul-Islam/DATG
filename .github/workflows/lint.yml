@@ -1,0 +1,25 @@
+name: Lint workflows
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  actionlint:
+    name: Lint GitHub Actions workflows
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      # actionlint statically checks every .github/workflows/*.yml — YAML
+      # syntax, context usage (`secrets` in `if:` etc.), expression typing,
+      # and (with shellcheck) the `run:` scripts. It catches the exact class
+      # of error that makes GitHub mark a workflow file invalid: because this
+      # workflow itself stays valid, it still runs and reports the broken file
+      # with a line/column annotation, instead of a run with zero jobs.
+      - name: Run actionlint
+        uses: raven-actions/actionlint@v2
+        with:
+          shellcheck: true
