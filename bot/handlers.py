@@ -1,6 +1,10 @@
-import logging
 import io
+import ipaddress
+import logging
+import re
+import requests
 from typing import Optional
+from urllib.parse import urljoin, urlsplit
 from telegram import Update
 from telegram.ext import ContextTypes, CommandHandler, MessageHandler, filters
 from bot.analyzer import DataAnalyzer
@@ -10,7 +14,9 @@ from bot.cloud_store import BlobSessionStore
 
 logger = logging.getLogger(__name__)
 
-MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024  # 20 MB Telegram limit
+MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024  # 20 MB download/upload limit
+
+_GSHEET_ID_RE = re.compile(r"/spreadsheets/d/([A-Za-z0-9_-]+)")
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Session helpers
@@ -102,12 +108,15 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "• ⚠️ **Outlier Detection** (IQR method per numeric column)\n"
         "• 📊 **Visual Charts** (distributions, correlations, time-series)\n"
         "• 🤖 **AI Insights** (plain-English data summary — if configured)\n\n"
-        "**Commands after uploading a file:**\n"
+        "**Commands after loading a dataset:**\n"
         "• `/preview [N]` — show first N rows (default 5)\n"
         "• `/columns` — list all columns with types & null counts\n"
         "• `/stats [col]` — per-column count/mean/min/max breakdown\n"
         "• `/sort <col> [asc|desc]` — reorder rows by a column\n"
         "• `/filter <col> <op> <val>` — filter rows (e.g. `/filter age > 30`)\n"
+        "• `/sheets` / `/sheet <name>` — browse Excel tabs\n"
+        "• `/load <url>` — analyze a CSV/Excel file from a link\n"
+        "• `/gsheet <url>` — analyze a public Google Sheet\n"
         "• `/export` — download the dataset as a cleaned CSV\n"
         "• `/help` — show this help again\n\n"
         "👇 Simply drag & drop or upload your file to get started!"
@@ -124,7 +133,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     """`/help` command handler."""
     help_text = (
         "💡 **How to Use:**\n\n"
-        "1. Attach a `.csv`, `.xlsx`, or `.xls` file in this chat.\n"
+        "1. Attach a `.csv`, `.xlsx`, or `.xls` file — or use `/load <url>` / `/gsheet <url>`.\n"
         "2. Wait a few seconds while the bot analyzes your data.\n"
         "3. View the generated metrics summary and high-resolution chart images.\n\n"
         "**Available Commands:**\n"
@@ -134,8 +143,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "• `/sort <col> [asc|desc]` — sort rows by a column, e.g. `/sort salary desc`\n"
         "• `/filter <col> <op> <val>` — filter rows, e.g. `/filter age > 30`\n"
         "  Supported operators: `>`, `<`, `>=`, `<=`, `==`, `!=`, `contains`\n"
+        "• `/sheets` — list the tabs of the loaded Excel workbook\n"
+        "• `/sheet <name>` — analyze a specific tab, e.g. `/sheet March`\n"
+        "• `/load <url>` — analyze a CSV/Excel file from a link\n"
+        "• `/gsheet <url>` — analyze a *public* Google Sheet\n"
         "• `/export` — download the currently loaded dataset as a CSV file\n\n"
-        "⚠️ **File Size Limit:** Files up to 20MB are supported."
+        "⚠️ **File Size Limit:** Files and downloads up to 20MB are supported."
     )
     if update.message:
         await update.message.reply_text(help_text, parse_mode="Markdown")
@@ -394,6 +407,311 @@ async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Shared dataset pipeline (used by file upload, /load and /gsheet)
+# ──────────────────────────────────────────────────────────────────────────────
+
+async def _process_dataset(update: Update, context: ContextTypes.DEFAULT_TYPE, data: bytes, filename: str) -> None:
+    """Parse, cache, persist, and analyze a newly loaded dataset."""
+    df = DataAnalyzer.load_dataframe(data, filename)
+    context.user_data["df"] = df
+    context.user_data["filename"] = filename
+    user_id = _user_id(update)
+    if user_id is not None:
+        _get_store().save(user_id, filename, data)
+
+    # Summary text
+    await update.message.reply_text(
+        DataAnalyzer.generate_summary(df, filename), parse_mode="Markdown"
+    )
+
+    # AI insight summary (optional)
+    ai_summary = DataAnalyzer.generate_ai_summary(df, filename, OPENAI_API_KEY)
+    if ai_summary:
+        await update.message.reply_text(
+            f"🤖 **AI Insights:**\n\n{ai_summary}", parse_mode="Markdown"
+        )
+
+    # Chart images (distributions, heatmap, categories, time-series)
+    charts = DataAnalyzer.generate_visualizations(df)
+    for chart_buf, caption in charts:
+        chart_buf.seek(0)
+        await update.message.reply_photo(photo=chart_buf, caption=caption)
+
+    # Session tip
+    await update.message.reply_text(
+        "✅ **Dataset loaded!** You can now use:\n"
+        "`/preview [N]` • `/columns` • `/stats [col]` • `/sort <col>` • `/filter <col> <op> <val>` • `/export`",
+        parse_mode="Markdown",
+    )
+
+    # Multi-sheet hint for Excel workbooks
+    sheets = DataAnalyzer.list_sheets(data, filename)
+    if len(sheets) > 1:
+        first = sheets[0]
+        await update.message.reply_text(
+            f"📑 This workbook has **{len(sheets)} sheets** (first: `{first}`).\n"
+            "Use `/sheets` to list them and `/sheet <name>` to analyze another tab.",
+            parse_mode="Markdown",
+        )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# URL / Google Sheets helpers
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _is_blocked_host(url: str) -> bool:
+    """Reject localhost/private-network targets to avoid SSRF-style fetches."""
+    host = (urlsplit(url).hostname or "").strip("[]").lower()
+    if host in ("localhost", "0.0.0.0"):
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        # Hostname, not an IP — not blocked here. (Note: a hostname that
+        # resolves to a private IP is not caught; acceptable for a personal bot.)
+        return False
+    return ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
+
+
+def _download_bytes(url: str, max_bytes: int = MAX_FILE_SIZE_BYTES, timeout: int = 30):
+    """
+    Download up to max_bytes from an http(s) URL.
+
+    Redirects are followed manually (max 5 hops) so each hop is validated
+    against private/local addresses. Returns (bytes, content_type). Raises
+    ValueError on bad schemes, blocked hosts, HTTP errors, or oversized bodies.
+    """
+    current = url
+    for _ in range(6):
+        parts = urlsplit(current)
+        if parts.scheme not in ("http", "https"):
+            raise ValueError("Only http/https links are supported.")
+        if _is_blocked_host(current):
+            raise ValueError("This link points to a local/private address — not allowed.")
+
+        with requests.get(
+            current, stream=True, timeout=timeout, allow_redirects=False,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; DATG-bot/1.0)"},
+        ) as resp:
+            if resp.is_redirect and resp.headers.get("Location"):
+                current = urljoin(current, resp.headers["Location"])
+                continue
+            resp.raise_for_status()
+            chunks = []
+            size = 0
+            for chunk in resp.iter_content(chunk_size=64 * 1024):
+                size += len(chunk)
+                if size > max_bytes:
+                    raise ValueError(f"Download exceeds the {max_bytes // (1024 * 1024)}MB limit.")
+                chunks.append(chunk)
+            return b"".join(chunks), resp.headers.get("Content-Type", "")
+
+    raise ValueError("Too many redirects while following the link.")
+
+
+def _derive_filename_from_url(url: str, content_type: str = "") -> str:
+    """Pick a sensible filename from a URL path or Content-Type."""
+    path_name = urlsplit(url).path.rsplit("/", 1)[-1]
+    if path_name and path_name.lower().endswith((".csv", ".xlsx", ".xls")):
+        return path_name
+    ctype = content_type.lower()
+    if "spreadsheet" in ctype or "excel" in ctype:
+        return "data.xlsx"
+    return "data.csv"
+
+
+def _parse_gsheet_url(url: str):
+    """Extract (sheet_id, gid_or_None) from a Google Sheets URL."""
+    match = _GSHEET_ID_RE.search(url or "")
+    if not match:
+        return None, None
+    gid_match = re.search(r"gid=(\d+)", url)
+    gid = gid_match.group(1) if gid_match else None
+    return match.group(1), gid
+
+
+def _gsheet_export_url(sheet_id: str, gid: Optional[str] = None) -> str:
+    """Build a public Google Sheets CSV export URL (no API key needed)."""
+    url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
+    if gid:
+        url += f"&gid={gid}"
+    return url
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# /sheets — list Excel tabs
+# ──────────────────────────────────────────────────────────────────────────────
+
+async def sheets_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """`/sheets` — list the sheet tabs of the loaded Excel workbook."""
+    df, filename = _get_df(update, context)
+    if df is None:
+        await _no_dataset_msg(update)
+        return
+
+    user_id = _user_id(update)
+    stored = _get_store().load(user_id) if user_id is not None else None
+    if stored is None:
+        if update.message:
+            await update.message.reply_text("❌ Workbook bytes unavailable.", parse_mode="Markdown")
+        return
+
+    _, data = stored
+    sheets = DataAnalyzer.list_sheets(data, filename)
+    if not sheets:
+        if update.message:
+            await update.message.reply_text(
+                "ℹ️ No sheet tabs found — this is a single-sheet/CSV dataset.",
+                parse_mode="Markdown",
+            )
+        return
+
+    lines = [f"📑 **Sheets in `{filename}`:**"]
+    for i, name in enumerate(sheets, 1):
+        marker = " ← current" if name == context.user_data.get("sheet") else ""
+        lines.append(f"{i}. `{name}`{marker}")
+    lines.append("\nUse `/sheet <name>` to analyze a specific tab.")
+    if update.message:
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# /sheet <name> — switch Excel tab
+# ──────────────────────────────────────────────────────────────────────────────
+
+async def sheet_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """`/sheet <name>` — analyze a specific sheet tab of the loaded workbook."""
+    df, filename = _get_df(update, context)
+    if df is None:
+        await _no_dataset_msg(update)
+        return
+
+    if not context.args:
+        if update.message:
+            await update.message.reply_text(
+                "⚠️ Usage: `/sheet <sheet-name>`\n"
+                "Use `/sheets` to see available tabs.",
+                parse_mode="Markdown",
+            )
+        return
+
+    name = " ".join(context.args)
+    user_id = _user_id(update)
+    stored = _get_store().load(user_id) if user_id is not None else None
+    if stored is None:
+        if update.message:
+            await update.message.reply_text("❌ Workbook bytes unavailable.", parse_mode="Markdown")
+        return
+
+    _, data = stored
+    try:
+        df = DataAnalyzer.load_dataframe(data, filename, sheet_name=name)
+    except ValueError as e:
+        if update.message:
+            await update.message.reply_text(f"❌ {str(e)}", parse_mode="Markdown")
+        return
+
+    context.user_data["df"] = df
+    context.user_data["sheet"] = name
+    if update.message:
+        await update.message.reply_text(
+            DataAnalyzer.generate_summary(df, filename), parse_mode="Markdown"
+        )
+        await update.message.reply_text(
+            f"✅ Sheet `{name}` is now active — use `/preview`, `/stats`, `/sort`, `/filter` on it.",
+            parse_mode="Markdown",
+        )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# /load <url> — analyze a file from a link
+# ──────────────────────────────────────────────────────────────────────────────
+
+async def load_url_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """`/load <url>` — download and analyze a CSV/Excel file from a link."""
+    if not context.args:
+        if update.message:
+            await update.message.reply_text(
+                "⚠️ Usage: `/load <url>`\n"
+                "Example: `/load https://example.com/data.csv`",
+                parse_mode="Markdown",
+            )
+        return
+
+    url = context.args[0]
+    status_msg = None
+    if update.message:
+        status_msg = await update.message.reply_text("⏳ Downloading from URL... Please wait.")
+
+    try:
+        data, content_type = _download_bytes(url)
+        filename = _derive_filename_from_url(url, content_type)
+        await _process_dataset(update, context, data, filename)
+    except Exception as e:
+        logger.exception("Error loading URL %s", url)
+        if update.message:
+            await update.message.reply_text(
+                f"❌ Could not load from URL: {str(e)}", parse_mode="Markdown"
+            )
+    finally:
+        if status_msg is not None:
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# /gsheet <url> — analyze a public Google Sheet
+# ──────────────────────────────────────────────────────────────────────────────
+
+async def gsheet_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """`/gsheet <url>` — pull a *public* Google Sheet and analyze it."""
+    if not context.args:
+        if update.message:
+            await update.message.reply_text(
+                "⚠️ Usage: `/gsheet <google-sheets-url>`\n"
+                "Example: `/gsheet https://docs.google.com/spreadsheets/d/...`\n\n"
+                "The sheet must be shared as *Anyone with the link* (public).",
+                parse_mode="Markdown",
+            )
+        return
+
+    url = context.args[0]
+    sheet_id, gid = _parse_gsheet_url(url)
+    if not sheet_id:
+        if update.message:
+            await update.message.reply_text(
+                "❌ That doesn't look like a Google Sheets link.", parse_mode="Markdown"
+            )
+        return
+
+    status_msg = None
+    if update.message:
+        status_msg = await update.message.reply_text("⏳ Fetching Google Sheet... Please wait.")
+
+    try:
+        export_url = _gsheet_export_url(sheet_id, gid)
+        data, _ = _download_bytes(export_url)
+        filename = f"gsheet_{sheet_id[:8]}.csv"
+        await _process_dataset(update, context, data, filename)
+    except Exception as e:
+        logger.exception("Error loading Google Sheet %s", url)
+        if update.message:
+            await update.message.reply_text(
+                "❌ Could not load the Google Sheet. Make sure it's shared as "
+                f"*Anyone with the link* (public). ({str(e)})",
+                parse_mode="Markdown",
+            )
+    finally:
+        if status_msg is not None:
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Document upload handler
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -424,51 +742,15 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     status_msg = await update.message.reply_text("⏳ Processing your dataset... Please wait.")
 
     try:
-        # Download document file bytes
         file_obj = await doc.get_file()
         file_bytes = await file_obj.download_as_bytearray()
-
-        # Load DataFrame; persist bytes in the session store (survives restarts)
-        data = bytes(file_bytes)
-        df = DataAnalyzer.load_dataframe(data, filename)
-        context.user_data["df"] = df
-        context.user_data["filename"] = filename
-        user_id = _user_id(update)
-        if user_id is not None:
-            _get_store().save(user_id, filename, data)
-
-        # Generate summary text
-        summary_text = DataAnalyzer.generate_summary(df, filename)
-        await update.message.reply_text(summary_text, parse_mode="Markdown")
-
-        # AI insight summary (optional)
-        ai_summary = DataAnalyzer.generate_ai_summary(df, filename, OPENAI_API_KEY)
-        if ai_summary:
-            await update.message.reply_text(
-                f"🤖 **AI Insights:**\n\n{ai_summary}",
-                parse_mode="Markdown"
-            )
-
-        # Generate and send chart images (distributions, heatmap, categories, time-series)
-        charts = DataAnalyzer.generate_visualizations(df)
-        for chart_buf, caption in charts:
-            chart_buf.seek(0)
-            await update.message.reply_photo(photo=chart_buf, caption=caption)
-
-        # Session tip
-        await update.message.reply_text(
-        "✅ **Dataset loaded!** You can now use:\n"
-        "`/preview [N]` • `/columns` • `/stats [col]` • `/sort <col>` • `/filter <col> <op> <val>` • `/export`",
-            parse_mode="Markdown"
-        )
-
+        await _process_dataset(update, context, bytes(file_bytes), filename)
     except Exception as e:
         logger.exception("Error processing document %s", filename)
         await update.message.reply_text(
             f"❌ **Error processing file:** {str(e)}",
             parse_mode="Markdown"
         )
-
     finally:
         # Delete temporary status message if possible
         try:
@@ -491,6 +773,10 @@ def get_bot_handlers():
         CommandHandler("stats", stats_command),
         CommandHandler("sort", sort_command),
         CommandHandler("filter", filter_command),
+        CommandHandler("sheets", sheets_command),
+        CommandHandler("sheet", sheet_command),
+        CommandHandler("load", load_url_command),
+        CommandHandler("gsheet", gsheet_command),
         CommandHandler("export", export_command),
         MessageHandler(filters.Document.ALL, handle_document),
     ]

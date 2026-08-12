@@ -43,9 +43,12 @@ class DataAnalyzer:
     """
 
     @staticmethod
-    def load_dataframe(file_bytes: bytes, filename: str) -> pd.DataFrame:
+    def load_dataframe(file_bytes: bytes, filename: str, sheet_name: Optional[str] = None) -> pd.DataFrame:
         """
         Loads bytes into a pandas DataFrame based on file extension.
+
+        For Excel files, `sheet_name` selects a specific tab; when None the
+        first sheet is used.
         """
         pd, np, plt, sns = _lazy_libs()
         buffer = io.BytesIO(file_bytes)
@@ -65,7 +68,16 @@ class DataAnalyzer:
                     raise ValueError("The uploaded dataset is empty.")
         elif filename_lower.endswith(('.xlsx', '.xls')):
             try:
-                df = pd.read_excel(buffer)
+                # None means "first sheet" (passing None to read_excel would
+                # return a dict of all sheets, so map it to 0 explicitly)
+                df = pd.read_excel(buffer, sheet_name=sheet_name if sheet_name is not None else 0)
+            except ValueError as e:
+                if sheet_name is not None:
+                    raise ValueError(
+                        f"Sheet `{sheet_name}` not found in the workbook. "
+                        "Use `/sheets` to list available tabs."
+                    ) from e
+                raise ValueError(f"Failed to parse Excel file: {str(e)}") from e
             except Exception as e:
                 raise ValueError(f"Failed to parse Excel file: {str(e)}")
         else:
@@ -78,6 +90,20 @@ class DataAnalyzer:
             raise ValueError("The uploaded dataset is empty.")
 
         return df
+
+    @staticmethod
+    def list_sheets(file_bytes: bytes, filename: str) -> List[str]:
+        """
+        Returns the sheet/tab names of an Excel workbook (empty for CSV).
+        """
+        if not filename.lower().endswith(('.xlsx', '.xls')):
+            return []
+        pd, np, plt, sns = _lazy_libs()
+        try:
+            workbook = pd.ExcelFile(io.BytesIO(file_bytes))
+            return list(workbook.sheet_names)
+        except Exception:
+            return []
 
     @staticmethod
     def generate_summary(df: pd.DataFrame, filename: str) -> str:

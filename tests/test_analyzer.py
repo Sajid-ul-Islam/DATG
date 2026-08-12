@@ -28,6 +28,17 @@ def sample_excel_bytes():
     return buf.getvalue()
 
 
+@pytest.fixture
+def multi_sheet_excel_bytes():
+    """An .xlsx with three tabs: Overview, Sales, Raw."""
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine='openpyxl') as writer:
+        pd.DataFrame({'a': [1, 2, 3]}).to_excel(writer, sheet_name='Overview', index=False)
+        pd.DataFrame({'region': ['EU', 'US'], 'sales': [10, 20]}).to_excel(writer, sheet_name='Sales', index=False)
+        pd.DataFrame({'x': ['raw']}).to_excel(writer, sheet_name='Raw', index=False)
+    return buf.getvalue()
+
+
 def test_load_csv_dataframe(sample_csv_bytes):
     df = DataAnalyzer.load_dataframe(sample_csv_bytes, "test_data.csv")
     assert isinstance(df, pd.DataFrame)
@@ -40,6 +51,40 @@ def test_load_excel_dataframe(sample_excel_bytes):
     assert isinstance(df, pd.DataFrame)
     assert len(df) == 4
     assert 'Score' in df.columns
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Multi-sheet Excel support
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_list_sheets(multi_sheet_excel_bytes):
+    sheets = DataAnalyzer.list_sheets(multi_sheet_excel_bytes, "book.xlsx")
+    assert sheets == ["Overview", "Sales", "Raw"]
+
+
+def test_list_sheets_csv_returns_empty(sample_csv_bytes):
+    assert DataAnalyzer.list_sheets(sample_csv_bytes, "data.csv") == []
+
+
+def test_list_sheets_bad_bytes_returns_empty():
+    assert DataAnalyzer.list_sheets(b"not an excel file", "book.xlsx") == []
+
+
+def test_load_excel_defaults_to_first_sheet(multi_sheet_excel_bytes):
+    df = DataAnalyzer.load_dataframe(multi_sheet_excel_bytes, "book.xlsx")
+    assert list(df.columns) == ["a"]
+
+
+def test_load_excel_named_sheet(multi_sheet_excel_bytes):
+    df = DataAnalyzer.load_dataframe(multi_sheet_excel_bytes, "book.xlsx", sheet_name="Sales")
+    assert list(df.columns) == ["region", "sales"]
+    assert len(df) == 2
+
+
+def test_load_excel_unknown_sheet_raises(multi_sheet_excel_bytes):
+    with pytest.raises(ValueError, match="Sheet `Nope` not found"):
+        DataAnalyzer.load_dataframe(multi_sheet_excel_bytes, "book.xlsx", sheet_name="Nope")
 
 
 def test_generate_summary(sample_csv_bytes):

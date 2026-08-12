@@ -1,4 +1,5 @@
 import logging
+import time
 from fastapi import FastAPI, Request, Response, HTTPException
 from telegram import Update
 from telegram.ext import Application
@@ -63,6 +64,38 @@ def _check_secret_header(request: Request) -> bool:
     return request.headers.get("X-Telegram-Bot-Api-Secret-Token") == TELEGRAM_WEBHOOK_SECRET
 
 
+_WEBHOOK_SELF_HEAL_INTERVAL = 60  # seconds between self-heal attempts per instance
+_last_self_heal_attempt = 0.0
+
+
+async def _self_heal_webhook() -> None:
+    """
+    Re-register the webhook with the configured secret so a misconfigured
+    registration (e.g. enabling TELEGRAM_WEBHOOK_SECRET without re-running
+    /api/set_webhook) repairs itself instead of locking the bot out.
+
+    Rate-limited per instance. Rejected updates are NOT processed here; Telegram
+    retries them after the heal, and those retries carry the correct secret.
+    """
+    global _last_self_heal_attempt
+    now = time.monotonic()
+    if now - _last_self_heal_attempt < _WEBHOOK_SELF_HEAL_INTERVAL:
+        return
+    # Set before the try: even a failed heal waits out the interval, so an
+    # attacker (or a broken token) can't force constant re-registration attempts.
+    _last_self_heal_attempt = now
+    try:
+        app = await get_telegram_app()
+        await app.bot.set_webhook(
+            url=WEBHOOK_URL,
+            secret_token=TELEGRAM_WEBHOOK_SECRET or None,
+            drop_pending_updates=False,  # never drop queued updates while healing
+        )
+        logger.info("Webhook self-healed: re-registered with secret token enabled.")
+    except Exception as e:
+        logger.warning("Webhook self-heal failed: %s", e)
+
+
 @fastapi_app.post("/webhook")
 @fastapi_app.post("/api/webhook")
 async def telegram_webhook(request: Request):
@@ -70,7 +103,14 @@ async def telegram_webhook(request: Request):
     Receives Webhook updates from Telegram API.
     """
     if not _check_secret_header(request):
-        return Response(content="Forbidden: invalid webhook secret", status_code=403)
+        logger.warning(
+            "Rejected webhook update: missing or invalid X-Telegram-Bot-Api-Secret-Token "
+            "(secret configured: %s). Re-registering webhook so Telegram retries "
+            "this update with the correct secret.",
+            bool(TELEGRAM_WEBHOOK_SECRET),
+        )
+        await _self_heal_webhook()
+if        return Response(content="Forbidden: invalid webhook secret", status_code=403)
     try:
         data = await request.json()
         app = await get_telegram_app()

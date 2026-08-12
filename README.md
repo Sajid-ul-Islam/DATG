@@ -18,6 +18,9 @@ A fast, production-ready Telegram bot that processes uploaded CSV and Excel (`.x
   - 🏷️ Frequency Bar Charts for top categorical features.
   - 📅 Time-Series Line Charts when date columns are detected.
 - **Interactive Commands**: Explore the loaded dataset with `/preview`, `/columns`, `/stats`, `/sort`, `/filter`, and `/export`.
+- **Multi-Sheet Excel**: browse workbook tabs with `/sheets` and analyze any tab with `/sheet <name>`.
+- **Load from URL**: analyze a CSV/Excel file from a direct link with `/load <url>`.
+- **Google Sheets**: analyze a *public* Google Sheet with `/gsheet <url>` (no API key needed).
 - **Persistent Sessions**: Uploaded datasets survive bot restarts — SQLite locally, [Vercel Blob](https://vercel.com/docs/storage/vercel-blob) on serverless deployments.
 - **Dual Deployment**:
   - **Local / VPS Polling Mode**: Simple setup without webhooks or public domains.
@@ -82,6 +85,10 @@ After uploading a dataset, the bot remembers it (see [Session Persistence](#sess
 | `/stats [col]` | Per-column breakdown: count/mean/std/min/max (numeric), unique/top (categorical), range (dates) |
 | `/sort <col> [asc|desc]` | Sort rows by a column (default ascending) |
 | `/filter <col> <op> <val>` | Filter rows, e.g. `/filter age > 30` |
+| `/sheets` | List the sheet tabs of the loaded Excel workbook |
+| `/sheet <name>` | Analyze a specific tab, e.g. `/sheet March` |
+| `/load <url>` | Download and analyze a CSV/Excel file from a link |
+| `/gsheet <url>` | Analyze a public Google Sheet (share it as *Anyone with the link*) |
 | `/export` | Download the loaded dataset as a CSV file |
 
 Examples:
@@ -103,6 +110,8 @@ Uploaded datasets are saved so they survive bot restarts:
 - **Vercel (serverless)** — stored in a [Vercel Blob](https://vercel.com/docs/storage/vercel-blob) store when `BLOB_READ_WRITE_TOKEN` is set. Create a Blob store in your Vercel dashboard and add its token to your project's Environment Variables. The serverless filesystem is read-only and ephemeral, so without this the bot falls back to in-memory sessions (datasets are lost when instances recycle).
 
 > **Note**: Blob URLs are publicly readable by anyone who knows them (the SDK currently only supports public access). URLs are unguessable, but avoid uploading highly sensitive datasets if that matters to you.
+>
+> **Multi-sheet caveat**: the *selected tab* (`/sheet <name>`) is kept in memory only — after a cold start the bot reloads the workbook's first sheet. The workbook bytes themselves do persist.
 
 ---
 
@@ -122,13 +131,64 @@ Uploaded datasets are saved so they survive bot restarts:
 5. Register the webhook with Telegram by visiting:
    `https://<your-vercel-app-domain>/api/set_webhook` in your browser.
 
-> **Hardening notes:** the included `vercel.json` raises the function `maxDuration` to 300s (the Hobby maximum) so heavy analysis always completes, and `drop_pending_updates` is enabled when registering the webhook to clear stale queued updates. If you set `TELEGRAM_WEBHOOK_SECRET`, re-visit `/api/set_webhook` after changing it.
+> **Hardening notes:** the included `vercel.json` raises the function `maxDuration` to 300s (the Hobby maximum) so heavy analysis always completes, and `drop_pending_updates` is enabled when registering the webhook to clear stale queued updates. If you set `TELEGRAM_WEBHOOK_SECRET`, re-visit `/api/set_webhook` after changing it — but the bot now *self-heals*: if it detects a secret mismatch it automatically re-registers the webhook (rate-limited), so a forgotten re-visit can't lock the bot out.
 
 ---
 
 ### Option B: Railway / Render / VPS (Polling or Webhook)
 
 Deploy as a background Python worker running `python main.py` with `TELEGRAM_BOT_TOKEN` specified as an environment variable.
+
+---
+
+## 🔍 Deployment Checklist
+
+After deploying to Vercel, verify everything in one shot from your machine:
+
+```bash
+# App URL is enough (token + URL also read from .env if present)
+python scripts/check_deployment.py --url https://<your-app>.vercel.app
+
+# Or rely on .env entirely
+python scripts/check_deployment.py
+```
+
+The script is read-only and checks:
+- Required env vars (`TELEGRAM_BOT_TOKEN`, app URL)
+- Deployed app health (`GET /api/health`)
+- Webhook registration (`getWebhookInfo`): URL matches, no `last_error_message`, pending updates
+
+It prints a ✅/❌/⚠️ checklist, explains any delivery errors (e.g. *Conflict* = local polling still running), and exits non-zero on critical issues.
+
+Add `--fix` to safely re-register the webhook when it's misconfigured (prompts for confirmation; `--yes` skips it). The fix calls the deployed app's own `/api/set_webhook` endpoint — the same action as visiting it in a browser — then re-runs the webhook checks:
+
+```bash
+python scripts/check_deployment.py --url https://<your-app>.vercel.app --fix
+```
+
+Add `--fix` to safely re-register the webhook when it's misconfigured (prompts for confirmation; `--yes` skips it). The fix calls the deployed app's own `/api/set_webhook` endpoint — the same action as visiting it in a browser — then re-runs the webhook checks:
+
+```bash
+python scripts/check_deployment.py --url https://<your-app>.vercel.app --fix
+```
+
+---
+
+## 🤖 CI (GitHub Actions)
+
+A workflow (`.github/workflows/deploy-check.yml`) runs on every push to `main`:
+
+1. **Tests** — installs dependencies and runs the full pytest suite.
+2. **Deployment check** — runs the [checklist](#-deployment-checklist) against the live deployment with `--fix --yes`, so a misconfigured webhook is repaired automatically (no manual `/api/set_webhook` visit).
+
+To enable the deployment check, configure two settings in your GitHub repo:
+
+- **Repository variable** `APP_URL` — e.g. `https://myapp.vercel.app`
+- **Secret** `TELEGRAM_BOT_TOKEN` — your bot token
+
+The job is skipped until both are set. Use the **Run workflow** button in the Actions tab to run it manually anytime.
+
+> **Note:** the check runs against the *currently live* deployment. Vercel builds asynchronously, so right after a push it may still be serving the previous commit — re-run the workflow manually (or wait for Vercel to finish) to verify the new deployment.
 
 ---
 
@@ -163,6 +223,8 @@ DATG/
 │   └── test_cloud_store.py    # Vercel Blob session persistence tests (offline)
 ├── .env.example
 ├── main.py                 # Local polling entry point
+├── scripts/
+│   └── check_deployment.py # Read-only deployment verification (env/health/webhook)
 ├── README.md
 ├── requirements.txt        # Python dependencies
 └── vercel.json             # Vercel serverless routing config
