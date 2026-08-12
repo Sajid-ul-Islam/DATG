@@ -132,7 +132,7 @@ Uploaded datasets are saved so they survive bot restarts:
 5. Register the webhook with Telegram by visiting:
    `https://<your-vercel-app-domain>/api/set_webhook` in your browser.
 
-> **Hardening notes:** the included `vercel.json` raises the function `maxDuration` to 300s (the Hobby maximum) so heavy analysis always completes, and `drop_pending_updates` is enabled when registering the webhook to clear stale queued updates. If you set `TELEGRAM_WEBHOOK_SECRET`, re-visit `/api/set_webhook` after changing it — but the bot now *self-heals*: if it detects a secret mismatch it automatically re-registers the webhook (rate-limited), so a forgotten re-visit can't lock the bot out.
+> **Hardening notes:** the included `vercel.json` raises the function `maxDuration` to 300s (the Hobby maximum) so heavy analysis always completes, and `drop_pending_updates` is enabled when registering the webhook to clear stale queued updates. If you set `TELEGRAM_WEBHOOK_SECRET`, re-visit `/api/set_webhook` after changing it — but the bot now *self-heals*: if it detects a secret mismatch it automatically re-registers the webhook (rate-limited), so a forgotten re-visit can't lock the bot out. The `/api/health` endpoint is *commit-aware*: it reports the deployed git SHA (from Vercel's `VERCEL_GIT_COMMIT_SHA` env var), which the [CI deployment check](#ci-github-actions) uses to wait for the new build before verifying the deployment — so checks never run against a stale build.
 
 ---
 
