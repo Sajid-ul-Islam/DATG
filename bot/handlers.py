@@ -118,6 +118,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "• `/load <url>` — analyze a CSV/Excel file from a link\n"
         "• `/gsheet <url>` — analyze a public Google Sheet\n"
         "• `/export` — download the dataset as a cleaned CSV\n"
+        "• `/report [csv|excel|pdf|img]` — download the analysis report\n"
         "• `/help` — show this help again\n\n"
         "👇 Simply drag & drop or upload your file to get started!"
     )
@@ -147,7 +148,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "• `/sheet <name>` — analyze a specific tab, e.g. `/sheet March`\n"
         "• `/load <url>` — analyze a CSV/Excel file from a link\n"
         "• `/gsheet <url>` — analyze a *public* Google Sheet\n"
-        "• `/export` — download the currently loaded dataset as a CSV file\n\n"
+        "• `/export` — download the currently loaded dataset as a CSV file\n"
+        "• `/report [fmt]` — download the report as CSV, Excel, PDF, or an image (`/report all` = every format)\n\n"
         "⚠️ **File Size Limit:** Files and downloads up to 20MB are supported."
     )
     if update.message:
@@ -385,6 +387,45 @@ async def filter_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 # /export
 # ──────────────────────────────────────────────────────────────────────────────
 
+_REPORT_FORMATS = {
+    "csv": "csv",
+    "excel": "xlsx",
+    "xlsx": "xlsx",
+    "pdf": "pdf",
+    "png": "png",
+    "img": "png",
+    "image": "png",
+    "all": "all",
+}
+
+
+def _report_doc(df, filename: str, fmt: str):
+    """
+    Build a downloadable report in `fmt` (csv/xlsx/pdf/png).
+    Returns (BytesIO buffer, download filename, markdown caption).
+    """
+    stem = filename.rsplit(".", 1)[0]
+    if fmt == "csv":
+        buf = io.BytesIO()
+        df.to_csv(buf, index=False, encoding='utf-8')
+        buf.seek(0)
+        return (
+            buf,
+            f"{stem}_export.csv",
+            f"📤 Exported `{filename}` as CSV ({len(df):,} rows × {len(df.columns)} columns)",
+        )
+    if fmt == "xlsx":
+        buf = DataAnalyzer.generate_excel_report(df, filename)
+        return buf, f"{stem}_report.xlsx", f"📗 Exported `{filename}` as Excel (data + summary sheets)"
+    if fmt == "pdf":
+        buf = DataAnalyzer.generate_pdf_report(df, filename)
+        return buf, f"{stem}_report.pdf", f"📕 Exported `{filename}` as a PDF report"
+    if fmt == "png":
+        buf = DataAnalyzer.generate_image_report(df, filename)
+        return buf, f"{stem}_report.png", f"🖼️ Exported `{filename}` as a report image"
+    raise ValueError(f"Unknown report format: {fmt}")
+
+
 async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """`/export` — send the loaded dataset back as a CSV file."""
     df, filename = _get_df(update, context)
@@ -392,18 +433,71 @@ async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await _no_dataset_msg(update)
         return
 
-    buf = io.BytesIO()
-    df.to_csv(buf, index=False, encoding='utf-8')
-    buf.seek(0)
-
-    export_name = filename.rsplit(".", 1)[0] + "_export.csv"
+    buf, export_name, caption = _report_doc(df, filename, "csv")
     if update.message:
         await update.message.reply_document(
             document=buf,
             filename=export_name,
-            caption=f"📤 Exported `{filename}` as CSV ({len(df):,} rows × {len(df.columns)} columns)",
+            caption=caption,
             parse_mode="Markdown",
         )
+
+
+async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """`/report [csv|excel|pdf|img|all]` — download the analysis report."""
+    df, filename = _get_df(update, context)
+    if df is None:
+        await _no_dataset_msg(update)
+        return
+
+    fmt_arg = context.args[0].lower() if context.args else None
+    if not fmt_arg or fmt_arg in ("help", "?"):
+        if update.message:
+            await update.message.reply_text(
+                f"📦 **Report Download**\n\n"
+                f"Generate and download the analysis report for `{filename}`:\n"
+                "• `/report csv` — dataset as CSV\n"
+                "• `/report excel` — Excel workbook (data + summary sheets)\n"
+                "• `/report pdf` — formatted PDF report\n"
+                "• `/report img` — whole report as a single image\n"
+                "• `/report all` — every format at once",
+                parse_mode="Markdown",
+            )
+        return
+
+    fmt = _REPORT_FORMATS.get(fmt_arg)
+    if fmt is None:
+        if update.message:
+            await update.message.reply_text(
+                f"❌ Unknown format `{fmt_arg}`.\n"
+                "Use `/report csv|excel|pdf|img|all` — see `/report` for details.",
+                parse_mode="Markdown",
+            )
+        return
+
+    formats = ["csv", "xlsx", "pdf", "png"] if fmt == "all" else [fmt]
+    status_msg = None
+    if update.message:
+        status_msg = await update.message.reply_text("⏳ Generating report... Please wait.")
+    try:
+        for f in formats:
+            buf, name, caption = _report_doc(df, filename, f)
+            if update.message:
+                await update.message.reply_document(
+                    document=buf, filename=name, caption=caption, parse_mode="Markdown"
+                )
+    except Exception as e:
+        logger.exception("Report generation failed for %s", filename)
+        if update.message:
+            await update.message.reply_text(
+                f"❌ Report generation failed: {str(e)}", parse_mode="Markdown"
+            )
+    finally:
+        if status_msg is not None:
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -440,7 +534,7 @@ async def _process_dataset(update: Update, context: ContextTypes.DEFAULT_TYPE, d
     # Session tip
     await update.message.reply_text(
         "✅ **Dataset loaded!** You can now use:\n"
-        "`/preview [N]` • `/columns` • `/stats [col]` • `/sort <col>` • `/filter <col> <op> <val>` • `/export`",
+        "`/preview [N]` • `/columns` • `/stats [col]` • `/sort <col>` • `/filter <col> <op> <val>` • `/export` • `/report`",
         parse_mode="Markdown",
     )
 
@@ -778,5 +872,6 @@ def get_bot_handlers():
         CommandHandler("load", load_url_command),
         CommandHandler("gsheet", gsheet_command),
         CommandHandler("export", export_command),
+        CommandHandler("report", report_command),
         MessageHandler(filters.Document.ALL, handle_document),
     ]

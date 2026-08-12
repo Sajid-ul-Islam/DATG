@@ -215,6 +215,52 @@ def test_generate_ai_summary_without_key():
     assert DataAnalyzer.generate_ai_summary(df, 'test.csv', '') is None
 
 
+def test_generate_excel_report(sample_csv_bytes):
+    df = DataAnalyzer.load_dataframe(sample_csv_bytes, "test_data.csv")
+    buf = DataAnalyzer.generate_excel_report(df, "test_data.csv")
+    data = buf.getvalue()
+    assert data[:2] == b"PK"  # ZIP magic — xlsx is a zipped XML
+    xls = pd.ExcelFile(io.BytesIO(data))
+    assert "Data" in xls.sheet_names
+    assert "Summary" in xls.sheet_names
+    assert "Numeric Stats" in xls.sheet_names
+
+
+def test_generate_excel_report_no_numeric_columns():
+    df = pd.DataFrame({"Dept": ["HR", "IT", "Finance"]})
+    buf = DataAnalyzer.generate_excel_report(df, "data.csv")
+    xls = pd.ExcelFile(io.BytesIO(buf.getvalue()))
+    assert "Data" in xls.sheet_names
+    assert "Numeric Stats" not in xls.sheet_names
+
+
+def test_generate_pdf_report(sample_csv_bytes):
+    df = DataAnalyzer.load_dataframe(sample_csv_bytes, "test_data.csv")
+    buf = DataAnalyzer.generate_pdf_report(df, "test_data.csv")
+    data = buf.getvalue()
+    assert data.startswith(b"%PDF")
+    assert b"%%EOF" in data
+
+
+def test_generate_pdf_report_no_charts():
+    df = pd.DataFrame({"x": [1, 2, 3]})
+    buf = DataAnalyzer.generate_pdf_report(df, "tiny.csv")
+    assert buf.getvalue().startswith(b"%PDF")
+
+
+def test_generate_image_report(sample_csv_bytes):
+    df = DataAnalyzer.load_dataframe(sample_csv_bytes, "test_data.csv")
+    buf = DataAnalyzer.generate_image_report(df, "test_data.csv")
+    data = buf.getvalue()
+    assert data.startswith(b'\x89PNG\r\n\x1a\n')
+
+
+def test_generate_image_report_no_charts():
+    df = pd.DataFrame({"x": [1, 2, 3]})
+    buf = DataAnalyzer.generate_image_report(df, "tiny.csv")
+    assert buf.getvalue().startswith(b'\x89PNG\r\n\x1a\n')
+
+
 def test_generate_summary_includes_new_sections():
     df = pd.DataFrame({
         'date': ['2024-01-01'] * 5,

@@ -11,6 +11,9 @@ logger = logging.getLogger(__name__)
 
 fastapi_app = FastAPI(title="Telegram Data Analysis Bot API")
 
+# Vercel's Python runtime requires the ASGI app exposed directly as `app`.
+app = fastapi_app
+
 # Lazy-loaded Application instance
 bot_app: Application = None
 
@@ -31,7 +34,7 @@ async def get_telegram_app() -> Application:
     return bot_app
 
 
-@fastapi_app.get("/")
+@app.get("/")
 async def root():
     return {
         "status": "online",
@@ -45,8 +48,8 @@ async def root():
     }
 
 
-@fastapi_app.get("/health")
-@fastapi_app.get("/api/health")
+@app.get("/health")
+@app.get("/api/health")
 async def health_check():
     return {"status": "ok", "service": "Telegram Data Analysis Bot"}
 
@@ -96,8 +99,8 @@ async def _self_heal_webhook() -> None:
         logger.warning("Webhook self-heal failed: %s", e)
 
 
-@fastapi_app.post("/webhook")
-@fastapi_app.post("/api/webhook")
+@app.post("/webhook")
+@app.post("/api/webhook")
 async def telegram_webhook(request: Request):
     """
     Receives Webhook updates from Telegram API.
@@ -110,7 +113,7 @@ async def telegram_webhook(request: Request):
             bool(TELEGRAM_WEBHOOK_SECRET),
         )
         await _self_heal_webhook()
-if        return Response(content="Forbidden: invalid webhook secret", status_code=403)
+        return Response(content="Forbidden: invalid webhook secret", status_code=403)
     try:
         data = await request.json()
         app = await get_telegram_app()
@@ -123,8 +126,8 @@ if        return Response(content="Forbidden: invalid webhook secret", status_co
         return Response(content=str(e), status_code=500)
 
 
-@fastapi_app.get("/set_webhook")
-@fastapi_app.get("/api/set_webhook")
+@app.get("/set_webhook")
+@app.get("/api/set_webhook")
 async def set_webhook():
     """
     Helper endpoint to trigger setWebhook call to Telegram API.
@@ -152,8 +155,4 @@ async def set_webhook():
         return {"status": "success", "message": msg}
     else:
         raise HTTPException(status_code=500, detail="Failed to set webhook with Telegram API.")
-
-
-# Expose FastAPI application as `app` for Vercel
-app = fastapi_app
 

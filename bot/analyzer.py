@@ -2,9 +2,29 @@ from __future__ import annotations
 
 import io
 import logging
+import re
 from typing import List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+
+_EMOJI_RE = re.compile(
+    r"[\U0001F000-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF\uFE0F\u200D\u2190-\u21FF]"
+)
+
+
+def _strip_emoji(text: str) -> str:
+    """Remove emoji/symbol glyphs that reportlab's built-in fonts can't render."""
+    return _EMOJI_RE.sub("", text)
+
+
+def _md_to_plain(text: str) -> str:
+    """Strip common markdown markers so text renders cleanly in PDFs/images."""
+    text = re.sub(r"```", "", text)
+    text = re.sub(r"\*\*([^*]*)\*\*", r"\1", text)
+    text = re.sub(r"`([^`]*)`", r"\1", text)
+    text = re.sub(r"^#+\s*", "", text, flags=re.M)
+    return text
 
 # Heavy data-science libraries (pandas, numpy, matplotlib, seaborn) are imported
 # lazily on first use so that importing this module stays cheap. This keeps
@@ -416,6 +436,267 @@ class DataAnalyzer:
         charts.extend(ts_charts)
 
         return charts
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Report Export (Excel / PDF / PNG image)
+    # ──────────────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def generate_excel_report(df: pd.DataFrame, filename: str) -> io.BytesIO:
+        """
+        Writes the dataset plus a summary sheet and numeric stats into an .xlsx
+        workbook. Returns a BytesIO buffer (rewound to 0).
+        """
+        pd, np, plt, sns = _lazy_libs()
+        buf = io.BytesIO()
+        with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+            df.to_excel(writer, sheet_name="Data", index=False)
+
+            rows, cols = df.shape
+            total_nulls = int(df.isnull().sum().sum())
+            summary_rows = [["Metric", "Value"]]
+            summary_rows.append(["File", filename])
+            summary_rows.append(["Rows", rows])
+            summary_rows.append(["Columns", cols])
+            summary_rows.append(["Missing values", total_nulls])
+            for col in df.columns:
+                dtype = str(df[col].dtype)
+                nulls = int(df[col].isnull().sum())
+                summary_rows.append([f"Column: {col}", f"{dtype} | {nulls} missing"])
+            pd.DataFrame(summary_rows[1:], columns=summary_rows[0]).to_excel(
+                writer, sheet_name="Summary", index=False
+            )
+
+            numeric_df = df.select_dtypes(include=[np.number])
+            if not numeric_df.empty:
+                numeric_df.describe().T.to_excel(writer, sheet_name="Numeric Stats")
+        buf.seek(0)
+        return buf
+
+    @staticmethod
+    def generate_pdf_report(df: pd.DataFrame, filename: str) -> io.BytesIO:
+        """
+        Builds a formatted multi-page PDF report: title, dataset summary,
+        numeric stats table, and embedded chart images.
+        """
+        from datetime import datetime, timezone
+        from html import escape
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+        from reportlab.lib.units import mm
+        from reportlab.platypus import Image, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+        pd, np, plt, sns = _lazy_libs()
+        buf = io.BytesIO()
+        doc = SimpleDocTemplate(
+            buf, pagesize=A4,
+            leftMargin=15 * mm, rightMargin=15 * mm,
+            topMargin=15 * mm, bottomMargin=15 * mm,
+        )
+
+        styles = getSampleStyleSheet()
+        title_style = ParagraphStyle("ReportTitle", parent=styles["Title"], fontSize=20, spaceAfter=6)
+        meta_style = ParagraphStyle("ReportMeta", parent=styles["BodyText"], fontSize=8.5, textColor=colors.grey, spaceAfter=12)
+        h2_style = ParagraphStyle("ReportH2", parent=styles["Heading2"], fontSize=12.5, spaceBefore=12, spaceAfter=5)
+        body_style = ParagraphStyle("ReportBody", parent=styles["BodyText"], fontSize=9.5, leading=13)
+        mono_style = ParagraphStyle("ReportMono", parent=styles["BodyText"], fontName="Courier", fontSize=8.5, leading=11)
+
+        def _summary_flowables(text: str) -> list:
+            """Convert the markdown summary into reportlab flowables."""
+            flowables = []
+            in_code = False
+            for raw in text.splitlines():
+                line = raw.rstrip()
+                if line.strip() == "```":
+                    in_code = not in_code
+                    continue
+                content = _strip_emoji(escape(_md_to_plain(line)))
+                if not content.strip():
+                    flowables.append(Spacer(1, 4))
+                    continue
+                flowables.append(Paragraph(content, mono_style if in_code else body_style))
+            return flowables
+
+        story = []
+        story.append(Paragraph("Data Analysis Report", title_style))
+        story.append(Paragraph(
+            f"<b>{escape(filename)}</b> — generated "
+            f"{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
+            meta_style,
+        ))
+
+        story.append(Paragraph("Dataset Summary", h2_style))
+        story.extend(_summary_flowables(DataAnalyzer.generate_summary(df, filename)))
+
+        numeric_df = df.select_dtypes(include=[np.number])
+        if not numeric_df.empty:
+            story.append(Paragraph("Numeric Statistics", h2_style))
+            stats = numeric_df.describe().T.round(2)
+            data_rows = [[str(i)] + [str(v) for v in row] for i, row in stats.iterrows()]
+            table = Table([["Column"] + list(stats.columns)] + data_rows, hAlign="LEFT")
+            table.setStyle(TableStyle([
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, -1), 8),
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2c3e50")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("GRID", (0, 0), (-1, -1), 0.4, colors.grey),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f4f6f7")]),
+            ]))
+            story.append(table)
+
+        charts = DataAnalyzer.generate_visualizations(df)
+        if charts:
+            from reportlab.platypus import PageBreak
+            story.append(PageBreak())
+            story.append(Paragraph("Charts", h2_style))
+            for chart_buf, caption in charts:
+                chart_buf.seek(0)
+                img = Image(chart_buf)
+                img.drawWidth = doc.width
+                img.drawHeight = img.drawWidth * img.imageHeight / img.imageWidth
+                story.append(img)
+                story.append(Paragraph(_strip_emoji(escape(_md_to_plain(caption))), meta_style))
+                story.append(Spacer(1, 10))
+
+        doc.build(story)
+        buf.seek(0)
+        return buf
+
+    @staticmethod
+    def generate_image_report(df: pd.DataFrame, filename: str) -> io.BytesIO:
+        """
+        Composes a single tall PNG report: colored header, summary text, and
+        all generated charts stacked vertically. Returns a BytesIO buffer.
+        """
+        from datetime import datetime, timezone
+        from matplotlib import font_manager
+        from PIL import Image as PILImage, ImageDraw, ImageFont
+
+        pd, np, plt, sns = _lazy_libs()
+        W = 1240
+        MARGIN = 48
+        TEXT_W = W - 2 * MARGIN
+        HEADER_H = 150
+        FOOTER_H = 60
+        BG = (255, 255, 255)
+        INK = (33, 37, 41)
+        ACCENT = (52, 73, 94)
+        BLUE = (52, 152, 219)
+
+        def _font(weight: str = "regular", size: int = 20) -> ImageFont.FreeTypeFont:
+            path = font_manager.findfont(
+                font_manager.FontProperties(family="DejaVu Sans", weight=weight)
+            )
+            return ImageFont.truetype(path, size)
+
+        title_font = _font("bold", 36)
+        meta_font = _font("regular", 17)
+        h_font = _font("bold", 24)
+        body_font = _font("regular", 19)
+        mono_font = _font("regular", 17)
+
+        measure_img = PILImage.new("RGB", (10, 10), BG)
+        measure = ImageDraw.Draw(measure_img)
+
+        def _wrap(font, text: str) -> List[str]:
+            lines, cur = [], ""
+            for word in text.split(" "):
+                trial = f"{cur} {word}".strip()
+                if measure.textlength(trial, font=font) <= TEXT_W:
+                    cur = trial
+                else:
+                    if cur:
+                        lines.append(cur)
+                    cur = word
+            if cur:
+                lines.append(cur)
+            return lines
+
+        def _line_h(font) -> int:
+            return font.getbbox("Ag")[3] + 6
+
+        # Classify summary lines into display blocks
+        blocks: List[Tuple[str, str]] = []
+        in_code = False
+        for raw in DataAnalyzer.generate_summary(df, filename).splitlines():
+            line = raw.rstrip()
+            if line.strip() == "```":
+                in_code = not in_code
+                continue
+            plain = _md_to_plain(line)
+            if not plain.strip():
+                continue
+            plain = _strip_emoji(plain)  # DejaVu Sans has no emoji glyphs
+            if in_code:
+                blocks.append(("mono", plain))
+            elif plain.lstrip().startswith("•"):
+                blocks.append(("body", plain))
+            else:
+                blocks.append(("head", plain))
+
+        block_fonts = {"head": h_font, "body": body_font, "mono": mono_font}
+
+        # Charts, resized to fit the canvas width
+        chart_imgs: List[Tuple[PILImage.Image, str]] = []
+        for chart_buf, caption in DataAnalyzer.generate_visualizations(df):
+            chart_buf.seek(0)
+            im = PILImage.open(chart_buf).convert("RGB")
+            scale = TEXT_W / im.width
+            im = im.resize((int(im.width * scale), int(im.height * scale)), PILImage.LANCZOS)
+            chart_imgs.append((im, _strip_emoji(_md_to_plain(caption)).strip()))
+
+        def _block_h(kind: str, text: str) -> int:
+            return len(_wrap(block_fonts[kind], text)) * _line_h(block_fonts[kind])
+
+        body_h = sum(_block_h(k, t) + 4 for k, t in blocks) + 24
+        charts_h = sum(im.height + 44 for im, _ in chart_imgs)
+        total_h = HEADER_H + body_h + charts_h + FOOTER_H
+
+        canvas = PILImage.new("RGB", (W, total_h), BG)
+        d = ImageDraw.Draw(canvas)
+
+        # Header band
+        d.rectangle([0, 0, W, HEADER_H], fill=ACCENT)
+        d.rectangle([0, HEADER_H - 6, W, HEADER_H], fill=BLUE)
+        d.text((MARGIN, 30), "Data Analysis Report", font=title_font, fill=(255, 255, 255))
+        d.text(
+            (MARGIN, 96),
+            f"{filename} — generated {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
+            font=meta_font, fill=(200, 210, 220),
+        )
+
+        y = HEADER_H + 16
+        for kind, text in blocks:
+            font = block_fonts[kind]
+            if kind == "head":
+                d.text((MARGIN, y), text, font=font, fill=BLUE)
+            else:
+                d.text((MARGIN, y), text, font=font, fill=INK)
+            y += _block_h(kind, text) + 4
+        y += 16
+
+        for im, caption in chart_imgs:
+            x = (W - im.width) // 2
+            d.rectangle(
+                [x - 6, y - 6, x + im.width + 6, y + im.height + 6],
+                fill=(245, 247, 250), outline=(210, 215, 222),
+            )
+            canvas.paste(im, (x, y))
+            y += im.height + 10
+            d.text((MARGIN, y), caption, font=meta_font, fill=(90, 100, 110))
+            y += 36
+
+        d.text(
+            (MARGIN, total_h - FOOTER_H + 22),
+            "Generated by Telegram Data Analysis Bot",
+            font=meta_font, fill=(150, 155, 160),
+        )
+
+        out = io.BytesIO()
+        canvas.save(out, format="PNG")
+        out.seek(0)
+        return out
 
     # ──────────────────────────────────────────────────────────────────────────
     # Row Sorting

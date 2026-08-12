@@ -12,7 +12,48 @@ from bot.handlers import (
     _gsheet_export_url,
     _is_blocked_host,
     _parse_gsheet_url,
+    _report_doc,
 )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# /report — _report_doc
+# ──────────────────────────────────────────────────────────────────────────────
+
+@pytest.fixture
+def report_df():
+    import pandas as pd
+    return pd.DataFrame({"Age": [25, 30, 35], "Dept": ["HR", "IT", "IT"]})
+
+
+def test_report_doc_csv(report_df):
+    buf, name, caption = _report_doc(report_df, "sales.csv", "csv")
+    assert name == "sales_export.csv"
+    assert "CSV" in caption
+    assert buf.getvalue().startswith(b"Age,Dept")
+
+
+def test_report_doc_excel(report_df):
+    buf, name, caption = _report_doc(report_df, "sales.csv", "xlsx")
+    assert name == "sales_report.xlsx"
+    assert buf.getvalue()[:2] == b"PK"
+
+
+def test_report_doc_pdf(report_df):
+    buf, name, caption = _report_doc(report_df, "sales.csv", "pdf")
+    assert name == "sales_report.pdf"
+    assert buf.getvalue().startswith(b"%PDF")
+
+
+def test_report_doc_png(report_df):
+    buf, name, caption = _report_doc(report_df, "sales.csv", "png")
+    assert name == "sales_report.png"
+    assert buf.getvalue().startswith(b"\x89PNG\r\n\x1a\n")
+
+
+def test_report_doc_unknown_format_raises(report_df):
+    with pytest.raises(ValueError, match="Unknown report format"):
+        _report_doc(report_df, "sales.csv", "docx")
 
 
 # ──────────────────────────────────────────────────────────────────────────────

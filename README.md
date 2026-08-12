@@ -90,6 +90,7 @@ After uploading a dataset, the bot remembers it (see [Session Persistence](#sess
 | `/load <url>` | Download and analyze a CSV/Excel file from a link |
 | `/gsheet <url>` | Analyze a public Google Sheet (share it as *Anyone with the link*) |
 | `/export` | Download the loaded dataset as a CSV file |
+| `/report [fmt]` | Download the analysis report as CSV, Excel, PDF, or an image (`/report all` = every format) |
 
 Examples:
 ```

@@ -12,3 +12,4 @@ pytest>=7.0.0
 openai>=1.0.0
 vercel-blob>=0.4.2
 requests>=2.31.0
+reportlab>=4.0.0
