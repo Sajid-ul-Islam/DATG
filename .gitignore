@@ -28,6 +28,11 @@ env/
 # Logs
 *.log
 
+# SQLite session database
+bot_sessions.db
+*.sqlite
+*.sqlite3
+
 # OS
 .DS_Store
 Thumbs.db

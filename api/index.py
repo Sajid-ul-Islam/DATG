@@ -1,9 +1,8 @@
 import logging
-import asyncio
 from fastapi import FastAPI, Request, Response, HTTPException
 from telegram import Update
 from telegram.ext import Application
-from bot.config import TELEGRAM_BOT_TOKEN, WEBHOOK_URL
+from bot.config import TELEGRAM_BOT_TOKEN, WEBHOOK_URL, TELEGRAM_WEBHOOK_SECRET
 from bot.handlers import get_bot_handlers
 
 logging.basicConfig(level=logging.INFO)
@@ -51,12 +50,27 @@ async def health_check():
     return {"status": "ok", "service": "Telegram Data Analysis Bot"}
 
 
+def _check_secret_header(request: Request) -> bool:
+    """
+    Verify Telegram's `X-Telegram-Bot-Api-Secret-Token` header.
+
+    Returns True when no secret is configured (opt-in hardening), or when the
+    header matches. Used to reject spoofed requests that never came from
+    Telegram.
+    """
+    if not TELEGRAM_WEBHOOK_SECRET:
+        return True
+    return request.headers.get("X-Telegram-Bot-Api-Secret-Token") == TELEGRAM_WEBHOOK_SECRET
+
+
 @fastapi_app.post("/webhook")
 @fastapi_app.post("/api/webhook")
 async def telegram_webhook(request: Request):
     """
     Receives Webhook updates from Telegram API.
     """
+    if not _check_secret_header(request):
+        return Response(content="Forbidden: invalid webhook secret", status_code=403)
     try:
         data = await request.json()
         app = await get_telegram_app()
@@ -82,9 +96,20 @@ async def set_webhook():
         )
 
     app = await get_telegram_app()
-    success = await app.bot.set_webhook(url=WEBHOOK_URL)
+    success = await app.bot.set_webhook(
+        url=WEBHOOK_URL,
+        secret_token=TELEGRAM_WEBHOOK_SECRET or None,
+        drop_pending_updates=True,
+    )
     if success:
-        return {"status": "success", "message": f"Webhook set successfully to {WEBHOOK_URL}"}
+        msg = f"Webhook set successfully to {WEBHOOK_URL}"
+        if TELEGRAM_WEBHOOK_SECRET:
+            msg += " (secret token enabled)"
+            logger.info(
+                "Webhook secret configured — Telegram will now require the "
+                "X-Telegram-Bot-Api-Secret-Token header on every update."
+            )
+        return {"status": "success", "message": msg}
     else:
         raise HTTPException(status_code=500, detail="Failed to set webhook with Telegram API.")
 
