@@ -14,10 +14,10 @@ A fast, production-ready Telegram bot that processes uploaded CSV and Excel (`.x
 - **AI Insight Summaries**: Optional plain-English data insights via OpenAI `gpt-4o-mini` (enabled with `OPENAI_API_KEY`).
 - **Visual Analytics**:
   - 📊 Distribution Histograms for numerical columns.
-  - 🔥 Correlation Heatmaps for multi-variable numerical relationships.
+  - 🌡️ Correlation Heatmaps (diverging `coolwarm` colormap — negatives are red, positives are blue).
   - 🏷️ Frequency Bar Charts for top categorical features.
   - 📅 Time-Series Line Charts when date columns are detected.
-- **Interactive Commands**: Explore the loaded dataset with `/preview`, `/columns`, `/stats`, `/sort`, `/filter`, and `/export`.
+- **Interactive Commands**: Explore the loaded dataset with `/preview`, `/columns`, `/stats`, `/sort`, `/filter`, `/export`, and `/clear`.
 - **Multi-Format Report Download**: Export the full analysis with `/report` — dataset as CSV, an Excel workbook (data + summary sheets), a formatted PDF report, or a single report image (`/report all` sends every format).
 - **Multi-Sheet Excel**: browse workbook tabs with `/sheets` and analyze any tab with `/sheet <name>`.
 - **Load from URL**: analyze a CSV/Excel file from a direct link with `/load <url>`.
@@ -32,7 +32,7 @@ A fast, production-ready Telegram bot that processes uploaded CSV and Excel (`.x
 ## 🚀 Quick Start (Local Polling)
 
 ### 1. Prerequisites
-- Python 3.9+ installed.
+- Python 3.10+ installed.
 - A Telegram Bot Token from [@BotFather](https://t.me/BotFather).
 
 ### 2. Installation & Setup
@@ -84,7 +84,7 @@ After uploading a dataset, the bot remembers it (see [Session Persistence](#sess
 | `/preview [N]` | Show the first N rows as a table (default 5, max 20) |
 | `/columns` | List all columns with data types and null counts |
 | `/stats [col]` | Per-column breakdown: count/mean/std/min/max (numeric), unique/top (categorical), range (dates) |
-| `/sort <col> [asc|desc]` | Sort rows by a column (default ascending) |
+| `/sort <col> [asc\|desc]` | Sort rows by a column (default ascending) |
 | `/filter <col> <op> <val>` | Filter rows, e.g. `/filter age > 30` |
 | `/sheets` | List the sheet tabs of the loaded Excel workbook |
 | `/sheet <name>` | Analyze a specific tab, e.g. `/sheet March` |
@@ -92,15 +92,18 @@ After uploading a dataset, the bot remembers it (see [Session Persistence](#sess
 | `/gsheet <url>` | Analyze a public Google Sheet (share it as *Anyone with the link*) |
 | `/export` | Download the loaded dataset as a CSV file |
 | `/report [fmt]` | Download the analysis report as CSV, Excel, PDF, or an image (`/report all` = every format) |
+| `/clear` | Unload the current dataset from memory and the durable store |
 
 Examples:
 ```
 /stats salary
 /sort age desc
 /filter department == IT
+/filter city contains York
+/clear
 ```
 
-`/filter` supports `>`, `<`, `>=`, `<=`, `==`, `!=`, and `contains`. Column names containing spaces work too (e.g. `/sort full name`).
+`/filter` supports `>`, `<`, `>=`, `<=`, `==`, `!=`, and `contains`. Column names containing spaces work too (e.g. `/sort full name`). Passing a non-numeric value for a numeric operator (e.g. `/filter age > abc`) returns a clear error instead of crashing.
 
 ---
 
@@ -110,6 +113,8 @@ Uploaded datasets are saved so they survive bot restarts:
 
 - **Local / polling mode** — stored in a SQLite database (`bot_sessions.db` by default). Override the location with `DATABASE_PATH` in `.env`.
 - **Vercel (serverless)** — stored in a [Vercel Blob](https://vercel.com/docs/storage/vercel-blob) store when `BLOB_READ_WRITE_TOKEN` is set. Create a Blob store in your Vercel dashboard and add its token to your project's Environment Variables. The serverless filesystem is read-only and ephemeral, so without this the bot falls back to in-memory sessions (datasets are lost when instances recycle).
+
+Use `/clear` at any time to explicitly remove your stored dataset from both memory and the durable store.
 
 > **Note**: Blob URLs are publicly readable by anyone who knows them (the SDK currently only supports public access). URLs are unguessable, but avoid uploading highly sensitive datasets if that matters to you.
 >
@@ -128,12 +133,12 @@ Uploaded datasets are saved so they survive bot restarts:
    - `WEBHOOK_URL`: `https://<your-vercel-app-domain>/api/webhook`
    - `OPENAI_API_KEY` *(optional)*: enables AI insight summaries.
    - `BLOB_READ_WRITE_TOKEN` *(optional)*: from a Vercel Blob store you create — enables persistent sessions across cold starts.
-   - `TELEGRAM_WEBHOOK_SECRET` *(optional)*: a random string you pick — Telegram will send it with every update and the bot rejects requests without it.
+   - `TELEGRAM_WEBHOOK_SECRET` *(optional)*: a random string you pick — Telegram will send it with every update and the bot rejects requests without it (only `A-Z a-z 0-9 _ -` characters are allowed; invalid values are ignored with a warning).
 4. Deploy the project.
 5. Register the webhook with Telegram by visiting:
    `https://<your-vercel-app-domain>/api/set_webhook` in your browser.
 
-> **Hardening notes:** the included `vercel.json` raises the function `maxDuration` to 300s (the Hobby maximum) so heavy analysis always completes, and `drop_pending_updates` is enabled when registering the webhook to clear stale queued updates. If you set `TELEGRAM_WEBHOOK_SECRET`, re-visit `/api/set_webhook` after changing it — but the bot now *self-heals*: if it detects a secret mismatch it automatically re-registers the webhook (rate-limited), so a forgotten re-visit can't lock the bot out. The `/api/health` endpoint is *commit-aware*: it reports the deployed git SHA (from Vercel's `VERCEL_GIT_COMMIT_SHA` env var), which the [CI deployment check](#ci-github-actions) uses to wait for the new build before verifying the deployment — so checks never run against a stale build.
+> **Hardening notes:** the included `vercel.json` raises the function `maxDuration` to 300s (the Hobby maximum) so heavy analysis always completes, and `drop_pending_updates` is enabled when registering the webhook to clear stale queued updates. If you set `TELEGRAM_WEBHOOK_SECRET`, re-visit `/api/set_webhook` after changing it — but the bot now *self-heals*: if it detects a secret mismatch it automatically re-registers the webhook (rate-limited per instance), so a forgotten re-visit can't lock the bot out. The `/api/health` endpoint is *commit-aware*: it reports the deployed git SHA (from Vercel's `VERCEL_GIT_COMMIT_SHA` env var), which the [CI deployment check](#ci-github-actions) uses to wait for the new build before verifying the deployment.
 
 ---
 
@@ -180,7 +185,7 @@ python scripts/check_deployment.py --url https://<your-app>.vercel.app --expect-
 
 A workflow (`.github/workflows/deploy-check.yml`) runs on every push to `main`:
 
-1. **Tests** — installs dependencies and runs the full pytest suite.
+1. **Tests** — installs dependencies and runs the full pytest suite (130 tests).
 2. **Deployment check** — runs the [checklist](#-deployment-checklist) with `--expect-commit $GITHUB_SHA --wait 600 --fix --yes`. It first **waits (up to 10 minutes)** until Vercel finishes building and the live app reports the exact commit being pushed (via `/api/health`), so it can never validate the previous deployment; a misconfigured webhook is then repaired automatically (no manual `/api/set_webhook` visit).
 
 To enable the deployment check, configure two settings in your GitHub repo:
@@ -201,6 +206,16 @@ Run unit tests to verify dataset loading, statistics, sorting, filtering, chart 
 ```bash
 pytest
 ```
+
+The full suite covers 130 tests including:
+- CSV/Excel parsing, multi-sheet workbooks, encoding fallback
+- Outlier detection, date-column detection, time-series charts
+- `/sort`, `/filter`, `/stats`, `/clear` command logic
+- Correlation heatmap, distribution grid, categorical bar chart
+- Excel, PDF, and PNG report generation
+- SSRF-blocking URL validation, redirect loop protection, size cap
+- Google Sheets URL parsing and export URL construction
+- Webhook secret-token validation and self-heal logic
 
 ---
 
@@ -226,7 +241,7 @@ DATG/
 │   ├── __init__.py
 │   ├── test_analyzer.py       # Analyzer unit tests (summary, stats, sort, charts, reports)
 │   ├── test_check_deployment.py  # Deployment checklist helper tests
-│   ├── test_handlers.py       # URL / Google Sheets / report-export helper tests
+│   ├── test_handlers.py       # URL / Google Sheets / report-export / clear-command tests
 │   ├── test_session_store.py  # SQLite session persistence tests
 │   ├── test_cloud_store.py    # Vercel Blob session persistence tests (offline)
 │   └── test_webhook.py        # Webhook secret-header tests
@@ -238,6 +253,18 @@ DATG/
 ├── requirements.txt           # Python dependencies
 └── vercel.json                # Vercel serverless routing config
 ```
+
+---
+
+## 🔧 Recent Improvements (v1.1.0)
+
+- **`/clear` command** — explicitly unload a dataset from memory and the durable store.
+- **Cold-start race fix** — `asyncio.Lock` in `get_telegram_app()` prevents double-initialization when two webhook requests arrive simultaneously.
+- **Non-blocking downloads** — `/load` and `/gsheet` now run network I/O in a thread executor, so the async event loop is never stalled during file downloads.
+- **Thread-safe store init** — `_get_store()` uses double-checked locking to safely handle concurrent callers in polling mode.
+- **Filter validation** — `/filter age > abc` now returns a clear error instead of raising an unhandled exception.
+- **Diverging heatmap** — correlation heatmap switched to `coolwarm` colormap so negative and positive correlations are visually distinct.
+- **Simplified entry point** — removed the deprecated `asyncio.get_event_loop()` pattern from `main.py`; `python-telegram-bot ≥ 20` manages the event loop internally.
 
 ---
 

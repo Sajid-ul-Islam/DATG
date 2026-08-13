@@ -1,4 +1,3 @@
-import asyncio
 import logging
 import sys
 from telegram.ext import Application
@@ -24,12 +23,6 @@ def main() -> None:
         sys.exit(1)
 
     logger.info("Initializing Telegram Data Analysis Bot (Polling Mode)...")
-
-    # Ensure event loop exists for Python 3.14+
-    try:
-        asyncio.get_event_loop()
-    except RuntimeError:
-        asyncio.set_event_loop(asyncio.new_event_loop())
 
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 

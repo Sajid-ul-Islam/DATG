@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import time
@@ -17,21 +18,26 @@ app = fastapi_app
 
 # Lazy-loaded Application instance
 bot_app: Application = None
+_bot_app_lock = asyncio.Lock()  # prevents double-init on concurrent cold starts
 
 
 async def get_telegram_app() -> Application:
     """
-    Initializes and initializes python-telegram-bot application for webhook handling.
+    Creates and initializes the python-telegram-bot Application for webhook handling.
+
+    The lock prevents a double-initialization race when two requests arrive
+    simultaneously during a serverless cold start.
     """
     global bot_app
-    if bot_app is None:
-        if not TELEGRAM_BOT_TOKEN:
-            raise ValueError("TELEGRAM_BOT_TOKEN environment variable is not configured.")
+    async with _bot_app_lock:
+        if bot_app is None:
+            if not TELEGRAM_BOT_TOKEN:
+                raise ValueError("TELEGRAM_BOT_TOKEN environment variable is not configured.")
 
-        bot_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-        for handler in get_bot_handlers():
-            bot_app.add_handler(handler)
-        await bot_app.initialize()
+            bot_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+            for handler in get_bot_handlers():
+                bot_app.add_handler(handler)
+            await bot_app.initialize()
     return bot_app
 
 

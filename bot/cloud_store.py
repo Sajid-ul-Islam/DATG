@@ -27,6 +27,12 @@ class BlobSessionStore:
 
     def __init__(self, prefix: str = _DEFAULT_PREFIX):
         self.prefix = prefix.strip("/")
+        # Cache import check once — avoids a try/import on every `.available` access.
+        try:
+            import vercel_blob  # noqa: F401
+            self._available = True
+        except ImportError:
+            self._available = False
 
     # ──────────────────────────────────────────────────────────────────────
     # Path helpers
@@ -48,12 +54,8 @@ class BlobSessionStore:
 
     @property
     def available(self) -> bool:
-        """True if the vercel_blob SDK can be imported."""
-        try:
-            import vercel_blob  # noqa: F401
-            return True
-        except ImportError:
-            return False
+        """True if the vercel_blob SDK is installed and importable."""
+        return self._available
 
     def save(self, user_id: int, filename: str, data: bytes) -> None:
         """Upsert the dataset bytes for a user."""

@@ -225,3 +225,85 @@ def test_download_bytes_too_many_redirects(monkeypatch):
     monkeypatch.setattr(handlers.requests, "get", fake_get)
     with pytest.raises(ValueError, match="Too many redirects"):
         _download_bytes("https://example.com/start")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# /clear — clear_command
+# ──────────────────────────────────────────────────────────────────────────────
+
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
+
+
+def _make_update(text=""):
+    """Build a minimal mock Update with a message."""
+    update = MagicMock()
+    update.effective_user = MagicMock()
+    update.effective_user.id = 42
+    update.message = MagicMock()
+    update.message.reply_text = AsyncMock()
+    return update
+
+
+def _make_context(user_data=None):
+    ctx = MagicMock()
+    ctx.user_data = user_data or {}
+    return ctx
+
+
+def test_clear_command_with_dataset():
+    """clear_command should wipe user_data and confirm deletion."""
+    from bot.handlers import clear_command
+
+    update = _make_update()
+    ctx = _make_context({"df": "dummy_df", "filename": "data.csv", "sheet": "Sheet1"})
+
+    with patch("bot.handlers._get_store") as mock_store:
+        mock_store.return_value.clear = MagicMock()
+        asyncio.run(clear_command(update, ctx))
+
+    assert "df" not in ctx.user_data
+    assert "filename" not in ctx.user_data
+    assert "sheet" not in ctx.user_data
+    mock_store.return_value.clear.assert_called_once_with(42)
+    update.message.reply_text.assert_called_once()
+    call_text = update.message.reply_text.call_args[0][0]
+    assert "cleared" in call_text.lower()
+
+
+def test_clear_command_no_dataset():
+    """clear_command with no loaded dataset should give an informational message."""
+    from bot.handlers import clear_command
+
+    update = _make_update()
+    ctx = _make_context({})
+
+    with patch("bot.handlers._get_store") as mock_store:
+        mock_store.return_value.clear = MagicMock()
+        asyncio.run(clear_command(update, ctx))
+
+    call_text = update.message.reply_text.call_args[0][0]
+    assert "nothing to clear" in call_text.lower() or "no dataset" in call_text.lower()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# filter _NUMERIC_OPS — non-numeric value guard
+# ──────────────────────────────────────────────────────────────────────────────
+
+def test_filter_rejects_non_numeric_for_numeric_op():
+    """filter_command should reply with an error (not crash) when val is not a number."""
+    from bot.handlers import filter_command
+    import pandas as pd
+
+    df = pd.DataFrame({"age": [25, 30, 35]})
+    update = _make_update()
+    ctx = _make_context({"df": df, "filename": "data.csv"})
+    ctx.args = ["age", ">", "not_a_number"]
+
+    asyncio.run(filter_command(update, ctx))
+
+    update.message.reply_text.assert_called_once()
+    call_text = update.message.reply_text.call_args[0][0]
+    assert "not_a_number" in call_text or "valid number" in call_text.lower()
+
+

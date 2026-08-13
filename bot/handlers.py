@@ -1,7 +1,9 @@
+import asyncio
 import io
 import ipaddress
 import logging
 import re
+import threading
 import requests
 from typing import Optional
 from urllib.parse import urljoin, urlsplit
@@ -23,6 +25,7 @@ _GSHEET_ID_RE = re.compile(r"/spreadsheets/d/([A-Za-z0-9_-]+)")
 # ──────────────────────────────────────────────────────────────────────────────
 
 _store = None  # SQLite SessionStore or BlobSessionStore, chosen on first use
+_store_lock = threading.Lock()  # guards _store initialization
 
 
 def _get_store():
@@ -31,16 +34,19 @@ def _get_store():
 
     Uses Vercel Blob when a `BLOB_READ_WRITE_TOKEN` is configured (persistent
     sessions on serverless deployments), otherwise falls back to the local
-    SQLite store.
+    SQLite store. A lock guarantees only one store instance is ever created,
+    even when the polling mode runs multiple threads concurrently.
     """
     global _store
     if _store is None:
-        if BLOB_READ_WRITE_TOKEN:
-            logger.info("Using Vercel Blob session store (persistent sessions)")
-            _store = BlobSessionStore()
-        else:
-            logger.info("Using SQLite session store (%s)", DATABASE_PATH)
-            _store = SessionStore(DATABASE_PATH)
+        with _store_lock:
+            if _store is None:  # double-checked locking
+                if BLOB_READ_WRITE_TOKEN:
+                    logger.info("Using Vercel Blob session store (persistent sessions)")
+                    _store = BlobSessionStore()
+                else:
+                    logger.info("Using SQLite session store (%s)", DATABASE_PATH)
+                    _store = SessionStore(DATABASE_PATH)
     return _store
 
 
@@ -119,6 +125,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "• `/gsheet <url>` — analyze a public Google Sheet\n"
         "• `/export` — download the dataset as a cleaned CSV\n"
         "• `/report [csv|excel|pdf|img]` — download the analysis report\n"
+        "• `/clear` — remove the currently loaded dataset\n"
         "• `/help` — show this help again\n\n"
         "👇 Simply drag & drop or upload your file to get started!"
     )
@@ -149,7 +156,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "• `/load <url>` — analyze a CSV/Excel file from a link\n"
         "• `/gsheet <url>` — analyze a *public* Google Sheet\n"
         "• `/export` — download the currently loaded dataset as a CSV file\n"
-        "• `/report [fmt]` — download the report as CSV, Excel, PDF, or an image (`/report all` = every format)\n\n"
+        "• `/report [fmt]` — download the report as CSV, Excel, PDF, or an image (`/report all` = every format)\n"
+        "• `/clear` — unload the current dataset and free memory\n\n"
         "⚠️ **File Size Limit:** Files and downloads up to 20MB are supported."
     )
     if update.message:
@@ -339,7 +347,15 @@ async def filter_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if op == "contains":
             mask = df[col].astype(str).str.contains(val_str, case=False, na=False)
         elif op in _NUMERIC_OPS:
-            val = float(val_str)
+            try:
+                val = float(val_str)
+            except ValueError:
+                if update.message:
+                    await update.message.reply_text(
+                        f"❌ `{val_str}` is not a valid number for operator `{op}`.",
+                        parse_mode="Markdown",
+                    )
+                return
             if op == ">":
                 mask = df[col] > val
             elif op == "<":
@@ -352,6 +368,8 @@ async def filter_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 mask = df[col] == val
             elif op == "!=":
                 mask = df[col] != val
+            else:
+                mask = df[col] == val  # unreachable, satisfies type checker
         else:
             if update.message:
                 await update.message.reply_text(
@@ -738,7 +756,8 @@ async def load_url_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         status_msg = await update.message.reply_text("⏳ Downloading from URL... Please wait.")
 
     try:
-        data, content_type = _download_bytes(url)
+        loop = asyncio.get_event_loop()
+        data, content_type = await loop.run_in_executor(None, _download_bytes, url)
         filename = _derive_filename_from_url(url, content_type)
         await _process_dataset(update, context, data, filename)
     except Exception as e:
@@ -785,8 +804,8 @@ async def gsheet_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         status_msg = await update.message.reply_text("⏳ Fetching Google Sheet... Please wait.")
 
     try:
-        export_url = _gsheet_export_url(sheet_id, gid)
-        data, _ = _download_bytes(export_url)
+        loop = asyncio.get_event_loop()
+        data, _ = await loop.run_in_executor(None, _download_bytes, export_url)
         filename = f"gsheet_{sheet_id[:8]}.csv"
         await _process_dataset(update, context, data, filename)
     except Exception as e:
@@ -803,6 +822,40 @@ async def gsheet_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 await status_msg.delete()
             except Exception:
                 pass
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# /clear — unload the current dataset
+# ──────────────────────────────────────────────────────────────────────────────
+
+async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """`/clear` — remove the loaded dataset from memory and the durable store."""
+    user_id = _user_id(update)
+    had_data = context.user_data.get("df") is not None
+
+    # Wipe in-memory cache
+    context.user_data.pop("df", None)
+    context.user_data.pop("filename", None)
+    context.user_data.pop("sheet", None)
+
+    # Wipe durable store (SQLite or Blob)
+    if user_id is not None:
+        try:
+            _get_store().clear(user_id)
+        except Exception as e:
+            logger.warning("Failed to clear durable session for user %s: %s", user_id, e)
+
+    if update.message:
+        if had_data:
+            await update.message.reply_text(
+                "🗑️ **Dataset cleared.** Upload a new file or use `/load` to start again.",
+                parse_mode="Markdown",
+            )
+        else:
+            await update.message.reply_text(
+                "ℹ️ No dataset was loaded — nothing to clear.",
+                parse_mode="Markdown",
+            )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -873,5 +926,6 @@ def get_bot_handlers():
         CommandHandler("gsheet", gsheet_command),
         CommandHandler("export", export_command),
         CommandHandler("report", report_command),
+        CommandHandler("clear", clear_command),
         MessageHandler(filters.Document.ALL, handle_document),
     ]

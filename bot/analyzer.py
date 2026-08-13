@@ -386,7 +386,8 @@ class DataAnalyzer:
                 axes_flat[i].set_ylabel("")
 
             # Turn off unused subplots
-            for j in range(i + 1, len(axes_flat)):
+            last_used = i if n > 0 else -1
+            for j in range(last_used + 1, len(axes_flat)):
                 fig.delaxes(axes_flat[j])
 
             plt.tight_layout()
@@ -402,7 +403,7 @@ class DataAnalyzer:
             corr = numeric_df[num_corr_cols].corr()
 
             fig, ax = plt.subplots(figsize=(7, 5))
-            sns.heatmap(corr, annot=True, fmt=".2f", cmap="Blues", ax=ax, cbar=True, square=True)
+            sns.heatmap(corr, annot=True, fmt=".2f", cmap="coolwarm", ax=ax, cbar=True, square=True)
             ax.set_title("Correlation Heatmap", fontsize=12, fontweight='bold')
 
             plt.tight_layout()
